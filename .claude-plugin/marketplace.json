@@ -11,7 +11,7 @@
       "name": "aicarnation",
       "source": "./plugins/aicarnation",
       "description": "Claude Code で話している間、横の小窓の 3D アバター（VRM）が表情・動き・読み上げで反応します（日本語のみ）。",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "license": "MIT",
       "keywords": ["avatar", "vrm", "voice", "japanese"]
     }

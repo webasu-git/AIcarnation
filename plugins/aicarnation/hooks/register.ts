@@ -234,192 +234,50 @@ const startedEngines = new Set<EngineId>()
 const engineRuns = new Map<EngineId, { stop: () => void; done: Promise<void> }>()
 
 /**
- * プラグインが使うものは、すべて1つの保存先フォルダに置く（フォルダごと消せば跡が残らない）。
+ * プラグインが使うものは、すべて1つの保存先フォルダ ~/.claude/plugins/data/aicarnation に置く（フォルダごと消せば跡が残らない）。
  * - data/    … 画面の保存データ（エージェント・設定・履歴・読み込んだ VRM）
  * - engines/ … /aicarnation-voice で入れた音声エンジン
+ * - token    … 合言葉
  *
- * プラグインのフォルダ（$.plugin.root）は更新のたびに版ごとの場所へ入れ替わるので、保存先にしない。
- * Claude Code がプラグインに用意する保存先（CLAUDE_PLUGIN_DATA、更新しても残る）が渡されていればそれを、
- * 無ければ同じ慣例の ~/.claude/plugins/data/aicarnation を使う
+ * Claude Code がプラグインに渡す保存先（CLAUDE_PLUGIN_DATA）は、入れ方によって名前が変わる（aicarnation-aicarnation など）。
+ * Claude Desktop のチャットに登録する MCP サーバーも同じ保存先・合言葉を使うので、いつも決まった場所にそろえる。
+ * プラグインのフォルダ（$.plugin.root）は更新のたびに版ごとの場所へ入れ替わるので、保存先にしない
  */
 let storageRoot = ''
 
 async function resolveStorageRoot($: EngineInterface): Promise<string> {
-  const given = await $.env.get('CLAUDE_PLUGIN_DATA')
-  if (given) return given
   const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
   const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
   const claudeDir = configDir ?? (home ? `${home}/.claude` : null)
-  // ホームが分からないときだけ、プラグインのフォルダの中に置く
-  return claudeDir ? `${claudeDir}/plugins/data/${$.plugin.name}` : `${$.plugin.root}/.data`
+  // ホームが分からないときだけ、Claude Code が渡す保存先か、プラグインのフォルダの中に置く
+  if (claudeDir) return `${claudeDir}/plugins/data/aicarnation`
+  return (await $.env.get('CLAUDE_PLUGIN_DATA')) ?? `${$.plugin.root}/.data`
 }
 
 /** 保存先を決めてから同梱サーバーを起動する（セッション開始を待たせないよう裏で行う） */
 async function startCompanion($: EngineInterface): Promise<void> {
   storageRoot = await resolveStorageRoot($)
-  await writeDesktopLauncher($).catch(() => undefined)
   await runServer($)
 }
 
-/** Claude Desktop に登録する MCP サーバーの入口（保存先フォルダに置く。版が変わっても同じ場所） */
-function desktopLauncherPath(): string {
-  return `${storageRoot}/claude-desktop-mcp.mjs`
-}
+/** Claude Desktop のチャットに登録するコマンド（Windows の PowerShell と Mac のターミナルで同じ文） */
+const DESKTOP_SETUP_COMMAND = 'node "$HOME/.claude/plugins/marketplaces/aicarnation/plugins/aicarnation/server/setup-desktop.mjs"'
 
 /**
- * Claude Desktop のチャット用 MCP サーバーの入口を、保存先フォルダに作り直す。
- * プラグインの置き場所（$.plugin.root）は更新のたびに変わるので、Claude Desktop にはこの入口を登録してもらい、
- * 入口が「いまのプラグイン」の MCP サーバーを読み込む。保存先も同じフォルダを使うので、合言葉がずれない
+ * /aicarnation-desktop：Claude Desktop のチャットでもアバターが反応するよう、登録のしかたを案内する。
+ * Claude のアプリは終了するときに設定ファイルを書き直すので、アプリの中から書いても消える。
+ * アプリを終了してから、ターミナルで setup-desktop.mjs を実行してもらう
  */
-async function writeDesktopLauncher($: EngineInterface): Promise<void> {
-  if (!storageRoot) return
-  await $.fs.write(`${storageRoot}/plugin-root.json`, JSON.stringify({ root: $.plugin.root }))
-  await $.fs.write(desktopLauncherPath(), DESKTOP_LAUNCHER)
-}
-
-const DESKTOP_LAUNCHER = String.raw`// AIcarnation：Claude Desktop のチャット用 MCP サーバーの入口。Claude Code のプラグインが、セッションのたびに作り直します。
-// プラグインの置き場所は版ごとに変わるので、ここから「いまのプラグイン」の MCP サーバーを読み込みます（このファイルは編集しないでください）
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-
-const here = dirname(fileURLToPath(import.meta.url))
-// 保存先（合言葉・キャラクターなど）は、このファイルのあるフォルダ。Claude Code のプラグインと同じ場所を使う
-process.env.AICARNATION_DATA ??= here
-const { root } = JSON.parse(readFileSync(join(here, 'plugin-root.json'), 'utf8'))
-await import(pathToFileURL(join(root, 'mcp', 'aicarnation-mcp.mjs')).href)
-`
-
-/** Claude Desktop の設定ファイルに書く、アバターの MCP サーバーの項目 */
-interface DesktopEntry {
-  command: string
-  args: string[]
-}
-
-/** /aicarnation-desktop で見せた登録の内容。yes はこれと同じものだけを書く（見せる前の yes は受け付けない） */
-let shownDesktopEntry = ''
-
-/**
- * Claude Desktop の設定ファイル（claude_desktop_config.json）の場所。設定のフォルダが無ければ null（Claude Desktop が無い）。
- * Windows の Microsoft Store 版は、%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude に置かれる
- */
-async function desktopConfigPath($: EngineInterface): Promise<string | null> {
-  const isWindows = (await $.env.get('OS')) === 'Windows_NT'
-  const exists = (path: string) => $.fs.exists(path).catch(() => false)
-  if (isWindows) {
-    const appData = await $.env.get('APPDATA')
-    if (appData && (await exists(`${appData}\\Claude`))) return `${appData}\\Claude\\claude_desktop_config.json`
-    const local = await $.env.get('LOCALAPPDATA')
-    if (local) {
-      const packages = await $.fs.list(`${local}\\Packages`).catch(() => [])
-      const store = packages.find((e) => e.kind === 'dir' && e.name.startsWith('Claude_'))
-      if (store) {
-        const dir = `${local}\\Packages\\${store.name}\\LocalCache\\Roaming\\Claude`
-        if (await exists(dir)) return `${dir}\\claude_desktop_config.json`
-      }
-    }
-    return null
-  }
-  const home = await $.env.get('HOME')
-  if (!home) return null
-  const dir = `${home}/Library/Application Support/Claude`
-  return (await exists(dir)) ? `${dir}/claude_desktop_config.json` : null
-}
-
-/** 設定ファイルを読む。無ければ空の設定、JSON として読めなければ null（書き換えない） */
-async function readDesktopConfig($: EngineInterface, path: string): Promise<{ config: Record<string, unknown>; text: string | null } | null> {
-  if (!(await $.fs.exists(path).catch(() => false))) return { config: {}, text: null }
-  const text = await $.fs.read(path)
-  if (!text.trim()) return { config: {}, text }
-  try {
-    const parsed = JSON.parse(text) as unknown
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? { config: parsed as Record<string, unknown>, text } : null
-  } catch {
-    return null
-  }
-}
-
-/**
- * /aicarnation-desktop：Claude Desktop のチャットでもアバターが反応するよう、Claude Desktop の設定ファイルに
- * アバターの MCP サーバーを登録する。1回目は書く内容を見せるだけで、`/aicarnation-desktop yes` で書く。
- * 書くときは元の設定ファイルを控えに残し、ほかの項目には触らず、mcpServers.aicarnation だけを足す（あれば入れ替える）
- */
-async function desktopCommand($: EngineInterface, args: string): Promise<string> {
-  if (!storageRoot) storageRoot = await resolveStorageRoot($)
-  await writeDesktopLauncher($)
-  const isWindows = (await $.env.get('OS')) === 'Windows_NT'
-  const node = await nodeCommand($)
-  const toNative = (p: string) => (isWindows ? p.replaceAll('/', '\\') : p)
-  const entry: DesktopEntry = { command: toNative(node), args: [toNative(desktopLauncherPath())] }
-  const entryJson = JSON.stringify({ mcpServers: { aicarnation: entry } }, null, 2)
-  const nodeNote =
-    node === 'node'
-      ? ['', '※ Claude Desktop が node を見つけられない場合は、"command" を node の場所（例：/usr/local/bin/node）に変えてください。']
-      : []
-
-  const path = await desktopConfigPath($)
-  if (!path) {
-    return [
-      'Claude Desktop の設定のフォルダが見つかりませんでした（Claude Desktop が入っていないか、まだ一度も起動していません）。',
-      'Claude Desktop を入れて一度起動してから、もう一度このコマンドを実行してください。',
-      '',
-      'ご自分で書く場合は、Claude Desktop の設定ファイル（claude_desktop_config.json）に次の内容を書いてください。',
-      '',
-      entryJson,
-      ...nodeNote,
-    ].join('\n')
-  }
-  const read = await readDesktopConfig($, path)
-  if (!read) {
-    return `Claude Desktop の設定ファイルを JSON として読めなかったため、書き換えませんでした。\n設定ファイル：${path}\n内容を直してから、もう一度実行してください。`
-  }
-  const servers = (read.config.mcpServers && typeof read.config.mcpServers === 'object' ? read.config.mcpServers : {}) as Record<string, unknown>
-  const current = servers.aicarnation
-  if (JSON.stringify(current) === JSON.stringify(entry)) {
-    return `Claude Desktop には、すでにアバターの MCP サーバーが登録されています（設定ファイル：${path}）。\nチャットでアバターが反応しない場合は、Claude Desktop を開き直してください。`
-  }
-
-  const confirmed = args.trim().toLowerCase() === 'yes' && shownDesktopEntry === JSON.stringify(entry)
-  if (!confirmed) {
-    shownDesktopEntry = JSON.stringify(entry)
-    return [
-      'Claude Desktop のチャットでもアバターが反応するよう、Claude Desktop の設定ファイルにアバターの MCP サーバーを登録します。',
-      '',
-      `設定ファイル：${path}`,
-      current
-        ? '・いま登録されている "aicarnation" の項目を、次の内容に入れ替えます。'
-        : read.text === null
-          ? '・設定ファイルが無いので、新しく作ります。'
-          : '・"mcpServers" に "aicarnation" の項目を足します。ほかの設定には触りません。',
-      read.text === null ? '' : '・書き換える前の設定ファイルを、同じフォルダに控えとして残します。',
-      '',
-      entryJson,
-      ...nodeNote,
-      '',
-      'よろしければ、次のコマンドで登録してください。',
-      '/aicarnation-desktop yes',
-    ]
-      .filter((line, i, all) => !(line === '' && all[i - 1] === ''))
-      .join('\n')
-  }
-
-  // 書く：元の設定ファイルを控えてから、aicarnation の項目だけを足す（入れ替える）
-  let backup = ''
-  if (read.text !== null) {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    backup = `${path}.aicarnation-backup-${stamp}`
-    await $.fs.write(backup, read.text)
-  }
-  const next = { ...read.config, mcpServers: { ...servers, aicarnation: entry } }
-  await $.fs.write(path, `${JSON.stringify(next, null, 2)}\n`)
-  shownDesktopEntry = ''
+function desktopCommand(): string {
   return [
-    'Claude Desktop の設定ファイルに、アバターの MCP サーバーを登録しました。',
-    `設定ファイル：${path}`,
-    ...(backup ? [`書き換える前の控え：${backup}`] : []),
+    'Claude Desktop のチャットでもアバターが反応するようにするには、次の手順で登録してください（最初に一度だけ）。',
     '',
-    'Claude Desktop を開き直してから、チャットで「アバターを開いて」と頼んでください。',
-    '登録した場所は、プラグインを更新しても変わりません。',
+    '1. Claude のアプリを終了する（Windows はタスクトレイのアイコンから「終了」、Mac は ⌘Q）',
+    '2. ターミナル（Windows は PowerShell、Mac はターミナル）で、次のコマンドを実行する',
+    `   ${DESKTOP_SETUP_COMMAND}`,
+    '3. Claude のアプリを開き、チャットで「アバターを開いて」と頼む',
+    '',
+    'アプリを起動したまま登録すると、アプリを終了するときに消えてしまうので、必ず終了してから実行してください。登録を外すときは、同じコマンドの最後に --remove を付けます。',
   ].join('\n')
 }
 
@@ -892,8 +750,7 @@ export const register: Register = (on) => {
     await $.command.register({ name: 'aicarnation', description: 'AIcarnation のアバターをブラウザで開く' })
     await $.command.register({
       name: 'aicarnation-desktop',
-      description: 'Claude Desktop のチャットでもアバターが反応するよう、Claude Desktop に登録する（確かめてから書きます）',
-      argumentHint: '[yes]',
+      description: 'Claude Desktop のチャットでもアバターが反応するよう、登録のしかたを案内する',
     })
     await $.command.register({
       name: 'aicarnation-voice',
@@ -916,13 +773,7 @@ export const register: Register = (on) => {
     }
   })
 
-  on('command.run', { command: 'aicarnation-desktop' }, async ($, e) => {
-    try {
-      return { text: await desktopCommand($, e.args) }
-    } catch (err) {
-      return { text: `うまくいきませんでした：${err instanceof Error ? err.message : String(err)}` }
-    }
-  })
+  on('command.run', { command: 'aicarnation-desktop' }, () => ({ text: desktopCommand() }))
 
   on('command.run', { command: 'aicarnation-voice' }, async ($, e) => {
     try {
