@@ -178,3 +178,19 @@ body.pip-body .stage {
   border-radius: 0;
   box-shadow: none;
 }
+
+/* 案内の文の中に置く、小さな文字のボタン（「この案内を消す」など） */
+.dismiss-link {
+  display: inline;
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.dismiss-link:hover {
+  color: var(--accent-strong);
+}

@@ -338,14 +338,36 @@ export interface DictWord {
   accentType: number
 }
 
-/** 辞書の言葉の一覧。エンジンが起動していなければ例外 */
+/**
+ * AivisSpeech が、ユーザー辞書のファイルがまだ無いとき（初めて起動したときなど）に「登録の例」として自分で書き込む言葉。
+ * 利用者が登録したものではないので、手を加えられていなければ消す（一度消せばファイルができるので、エンジンは書き直さない）。
+ * 例を書き換えて使っている場合は、利用者の言葉として残す
+ */
+export const ENGINE_SAMPLE_WORD = { uuid: 'dc94a187-9881-43c9-a9c1-cebbf774a96d', surface: '担々麺', pronunciation: 'タンタンメン', accentType: 3 }
+
+/** 表記・読み・アクセントが登録の例と同じか（書き出しファイルの言葉など、uuid が無いもの） */
+export function isEngineSampleEntry(word: Omit<DictWord, 'uuid'>): boolean {
+  const s = ENGINE_SAMPLE_WORD
+  return word.surface === s.surface && word.pronunciation === s.pronunciation && word.accentType === s.accentType
+}
+
+/** エンジンが書き込んだ登録の例そのものか（uuid も同じで、手を加えられていない） */
+export function isEngineSampleWord(word: DictWord): boolean {
+  return word.uuid === ENGINE_SAMPLE_WORD.uuid && isEngineSampleEntry(word)
+}
+
+/**
+ * 辞書の言葉の一覧（利用者が登録したものだけ）。エンジンが起動していなければ例外。
+ * AivisSpeech が最初に書き込む登録の例（担々麺）は、ここで消して一覧にも入れない（書き出しにも入らない）
+ */
 export async function listDictWords(): Promise<DictWord[]> {
   const res = await engineFetch('aivis', '/user_dict')
   if (!res.ok) throw new Error('辞書を読み込めませんでした')
   const words = (await res.json()) as Record<string, { surface: string; pronunciation: string; accent_type: number }>
-  return Object.entries(words)
-    .map(([uuid, w]) => ({ uuid, surface: w.surface, pronunciation: w.pronunciation, accentType: w.accent_type }))
-    .sort((a, b) => a.surface.localeCompare(b.surface, 'ja'))
+  const list = Object.entries(words).map(([uuid, w]) => ({ uuid, surface: w.surface, pronunciation: w.pronunciation, accentType: w.accent_type }))
+  const sample = list.find(isEngineSampleWord)
+  if (sample) await removeDictWord(sample.uuid).catch(() => undefined)
+  return list.filter((w) => !isEngineSampleWord(w)).sort((a, b) => a.surface.localeCompare(b.surface, 'ja'))
 }
 
 /** 読みは全角カタカナ（ひらがなはカタカナに直す。長音・小さい文字を含む） */

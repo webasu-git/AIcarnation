@@ -19,7 +19,7 @@ import {
   resolveVoice,
   type CharacterFile,
 } from '../agents/characterFile'
-import { addDictWord, cachedEngineStyles, listDictWords, parseEngineVoiceURI } from '../voice/engines'
+import { addDictWord, cachedEngineStyles, isEngineSampleEntry, listDictWords, parseEngineVoiceURI } from '../voice/engines'
 import { deleteRemoteAgent, syncAgent } from '../api/agents'
 import { deleteAgent, loadAgents, saveAgent } from '../db/agents'
 import { clearMessages } from '../db/messages'
@@ -114,6 +114,17 @@ export const useAgentsStore = defineStore('agents', () => {
     await releaseFiles(filesOf(before))
   }
 
+  /**
+   * 読み込んだキャラクターの「足りない素材」の案内を、種類ごとに消す（その素材を使わないことにしたとき）。
+   * 動きの案内は、同じ名前のファイルを入れないと消えないので、使わない場合はここから消す
+   */
+  async function dismissMissing(id: string, key: keyof AgentMissing) {
+    const agent = agents.value.find((a) => a.id === id)
+    if (!agent?.missing?.[key]) return
+    const { [key]: _removed, ...rest } = agent.missing
+    await update(id, { missing: Object.keys(rest).length ? rest : undefined })
+  }
+
   /** キャラクターが使っているファイル（VRM・動き・背景・アイコン）の id */
   function filesOf(agent: AgentDefinition): string[] {
     const ids = Object.values(agent.motions ?? {}).flatMap((list) => (list ?? []).map((m) => m.fileId))
@@ -189,7 +200,14 @@ export const useAgentsStore = defineStore('agents', () => {
    * 書き出したキャラクターを読み込み、新しいキャラクターとして足す。素材のファイルは入っていないので、
    * まだ入っていないもの（VRM・動き・声のモデル）を missing に覚え、入れたものから消す
    */
-  async function importCharacter(text: string): Promise<{ agent: AgentDefinition; needs: string[] }> {
+  /**
+   * キャラクターの書き出しファイルを読み込む。読みの辞書は、書き出した PC の辞書がそのまま入っているので、
+   * 黙って足さず、confirmWords で利用者に確かめてから、まだ無い言葉だけを足す（足さないなら何もしない）
+   */
+  async function importCharacter(
+    text: string,
+    confirmWords: (words: CharacterFile['dictionary']) => boolean = () => false,
+  ): Promise<{ agent: AgentDefinition; needs: string[] }> {
     if (new TextEncoder().encode(text).byteLength > MAX_CHARACTER_JSON_BYTES) throw new Error('ファイルが大きすぎます')
     let parsed: unknown
     try {
@@ -240,7 +258,9 @@ export const useAgentsStore = defineStore('agents', () => {
     if (missing.motions) needs.push(`動きのファイル ${missing.motions.length} 個`)
     if (missing.backgroundFileName) needs.push(`背景の画像・動画（${missing.backgroundFileName}）`)
     if (missing.icon) needs.push(`アイコンの画像（${missing.icon.name}）`)
-    const words = await addMissingWords(file.dictionary)
+    // 以前の書き出しファイルに入っている、AivisSpeech の登録の例（担々麺）は足さない
+    const dictionary = file.dictionary.filter((w) => !isEngineSampleEntry(w))
+    const words = dictionary.length && confirmWords(dictionary) ? await addMissingWords(dictionary) : 0
     if (words === null) needs.push('読みの辞書（AivisSpeech を起動してから読み込み直していただくと入ります）')
     return { agent, needs }
   }
@@ -262,5 +282,19 @@ export const useAgentsStore = defineStore('agents', () => {
     }
   }
 
-  return { agents, currentId, current, load, select, create, update, setMotions, duplicate, remove, exportCharacter, importCharacter }
+  return {
+    agents,
+    currentId,
+    current,
+    load,
+    select,
+    create,
+    update,
+    setMotions,
+    duplicate,
+    remove,
+    exportCharacter,
+    importCharacter,
+    dismissMissing,
+  }
 })

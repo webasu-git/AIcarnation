@@ -346,6 +346,9 @@ function clearHistory() {
           </p>
           <p v-if="agents.current?.missing?.vrmFileName" class="hint">
               読み込んだ設定では「{{ agents.current.missing.vrmFileName }}」が使われていました。同じモデルをご用意のうえ、追加してください。
+              <button type="button" class="dismiss-link" @click="agents.current && agents.dismissMissing(agents.current.id, 'vrmFileName')">
+                この案内を消す
+              </button>
             </p>
             <p v-if="loader.error.value" class="error">{{ loader.error.value }}</p>
           </section>
@@ -370,6 +373,9 @@ function clearHistory() {
             </dl>
             <p v-if="agents.current.missing?.voice" class="hint">
               読み込んだ設定では、AivisSpeech の声「{{ agents.current.missing.voice.speaker }}（{{ agents.current.missing.voice.style }}）」が使われていました。声のモデルを「素材」タブで追加してから、「声を編集」でお選びください。
+              <button type="button" class="dismiss-link" @click="agents.current && agents.dismissMissing(agents.current.id, 'voice')">
+                この案内を消す
+              </button>
             </p>
             <div class="card-actions">
               <button :disabled="chat.streaming" @click="openEditor(agents.current, 1)"><AppIcon name="pencil" :size="14" />人格を編集</button>

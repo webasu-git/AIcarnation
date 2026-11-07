@@ -10,16 +10,34 @@ AI に顔と声を。Claude Code と Claude Desktop での会話に、3D アバ�
 
 ## 入れ方
 
-必要なもの：Claude Code、[Node.js](https://nodejs.org/) 18 以上、パソコンの Chrome か Edge
+必要なもの：Claude Code（入れるときはターミナルの `claude` コマンドを使います）、[Node.js](https://nodejs.org/) 18 以上、パソコンの Chrome か Edge
 
-Claude Code で次の2つを実行し、Claude Code を開き直してください。
+入れ方は、次の3つの手順です。**手順 3 の再読み込みは必ず行ってください**（行わないと、入れたプラグインが Claude Code に反映されません）。
+
+**1. ターミナルで、次の2つを順に実行する**（Mac はターミナル.app、Windows は PowerShell）
 
 ```
-/plugin marketplace add webasu-git/AIcarnation
-/plugin install aicarnation@aicarnation
+claude plugin marketplace add webasu-git/AIcarnation
 ```
 
-開き直したら `/aicarnation` で、ブラウザにアバターが開きます。
+```
+claude plugin install aicarnation@aicarnation
+```
+
+**2. Claude Code を開く**（デスクトップアプリの「Code」か、ターミナル版）
+
+**3. Claude Code で、プラグインを再読み込みする**
+
+```
+/reload-plugins
+```
+
+- 手順 1 は、必ずターミナルで実行してください。Claude のデスクトップアプリの中で `/plugin` と打つと、プラグインを選ぶ画面に切り替わり、コマンドとしては動きません。ターミナルで入れたプラグインは、デスクトップアプリでもそのまま使えます（設定を共有しています）。
+- `claude: command not found` と出る場合は、ターミナル版の Claude Code を入れてください（[Claude Code の入れ方](https://code.claude.com/docs/en/setup)）。
+
+再読み込みしたら `/aicarnation` で、ブラウザにアバターが開きます。
+
+Claude Desktop のチャットでもアバターを反応させるには、最初に一度だけ、Claude Code で `/aicarnation-desktop` を実行し、表示された内容を確かめてから `/aicarnation-desktop yes` で登録してください。Claude Desktop を開き直すと、チャットでも反応します（[詳しくはプラグインの説明](plugins/aicarnation/README.md#claude-desktop-のチャットで使う試作)）。
 
 ## このプラグインがすること
 

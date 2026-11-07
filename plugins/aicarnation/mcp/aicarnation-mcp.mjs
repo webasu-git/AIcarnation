@@ -321,7 +321,7 @@ async function handle(message) {
       return reply(id, {
         protocolVersion: params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
-        serverInfo: { name: APP, version: '0.1.0' },
+        serverInfo: { name: APP, version: '0.1.1' },
         ...(quiet ? {} : { instructions: INSTRUCTIONS }),
       })
     }

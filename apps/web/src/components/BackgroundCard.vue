@@ -255,6 +255,9 @@ const sizeNote = computed(() => {
     </template>
     <p v-if="agents.current?.missing?.backgroundFileName" class="hint">
       読み込んだ設定では、背景に「{{ agents.current.missing.backgroundFileName }}」を使っていました。同じ画像・動画をご用意のうえ、追加し直してください。
+      <button type="button" class="dismiss-link" @click="agents.current && agents.dismissMissing(agents.current.id, 'backgroundFileName')">
+        この案内を消す
+      </button>
     </p>
     <p v-if="fileError" class="error">{{ fileError }}</p>
     <p v-if="error" class="error">{{ error }}</p>

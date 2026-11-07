@@ -139,14 +139,22 @@ async function addPending() {
       ファイル名の先頭に「(待機)」「(考える)」「(作業中)」「(話す)」「(挨拶)」「(喜ぶ)」「(気まぐれ)」の印を付けておくと、自動で役に振り分けます。このカードにドロップして入れることもできます。
     </p>
     <div v-if="expected.length" class="expected">
-      <p class="pending-title">読み込んだ設定で使っていた動き（まだ入っていません）</p>
-      <p class="hint">同じ名前のファイルを「まとめて追加」で追加すると、元の役に入ります。</p>
-      <ul>
-        <li v-for="(m, i) in expected" :key="i">
-          <span class="motion-file" :title="m.name">{{ m.name }}</span>
-          <span class="motion-hint">{{ ROLE_LABEL.get(m.role) ?? m.role }}</span>
-        </li>
-      </ul>
+      <p class="pending-title">読み込んだ設定で使っていた動きが {{ expected.length }} 個あります（まだ入っていません）</p>
+      <p class="hint">
+        同じ名前のファイルを「まとめて追加」で追加すると、元の役に入ります。使わない場合は、この案内を消せます。
+        <button type="button" class="dismiss-link" @click="agents.current && agents.dismissMissing(agents.current.id, 'motions')">
+          この案内を消す
+        </button>
+      </p>
+      <details>
+        <summary>ファイル名の一覧</summary>
+        <ul>
+          <li v-for="(m, i) in expected" :key="i">
+            <span class="motion-file" :title="m.name">{{ m.name }}</span>
+            <span class="motion-hint">{{ ROLE_LABEL.get(m.role) ?? m.role }}</span>
+          </li>
+        </ul>
+      </details>
     </div>
     <p v-if="busy" class="hint">読み込んでいます…</p>
     <p v-else-if="message" class="hint">{{ message }}</p>

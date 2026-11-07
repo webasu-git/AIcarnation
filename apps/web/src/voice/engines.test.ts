@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { engineVoiceURI, isKatakana, licenseNameOf, parseEngineVoiceURI, timeMoras, toKatakana, type Synthesized } from './engines'
+import {
+  ENGINE_SAMPLE_WORD,
+  engineVoiceURI,
+  isEngineSampleEntry,
+  isEngineSampleWord,
+  isKatakana,
+  licenseNameOf,
+  parseEngineVoiceURI,
+  timeMoras,
+  toKatakana,
+  type Synthesized,
+} from './engines'
 import { visemeForVowel } from '../chat/lipSync'
 
 const audio = new ArrayBuffer(0)
@@ -77,5 +88,15 @@ describe('読みの辞書の読み', () => {
     expect(isKatakana('コーヒー')).toBe(true)
     expect(isKatakana('Shinonome')).toBe(false)
     expect(isKatakana('シノ ノメ')).toBe(false)
+  })
+})
+
+describe('AivisSpeech の登録の例（担々麺）', () => {
+  it('エンジンが書き込んだままの例だけを見分け、書き換えたものや利用者の言葉は残す', () => {
+    expect(isEngineSampleWord({ ...ENGINE_SAMPLE_WORD })).toBe(true)
+    expect(isEngineSampleWord({ ...ENGINE_SAMPLE_WORD, pronunciation: 'タンタンメン゛' })).toBe(false)
+    expect(isEngineSampleWord({ ...ENGINE_SAMPLE_WORD, uuid: 'other' })).toBe(false)
+    expect(isEngineSampleEntry({ surface: '担々麺', pronunciation: 'タンタンメン', accentType: 3 })).toBe(true)
+    expect(isEngineSampleEntry({ surface: '東雲', pronunciation: 'シノノメ', accentType: 0 })).toBe(false)
   })
 })

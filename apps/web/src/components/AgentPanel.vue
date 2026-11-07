@@ -68,7 +68,20 @@ async function importFile(e: Event) {
   if (!file) return
   try {
     await chat.stopPerforming()
-    const { agent, needs } = await agents.importCharacter(await file.text())
+    // 書き出しファイルの読みの辞書は、書き出した PC の辞書なので、足すかどうかを確かめる
+    const { agent, needs } = await agents.importCharacter(await file.text(), (words) =>
+      window.confirm(
+        [
+          `この書き出しファイルには、読みの辞書の言葉が ${words.length} 語入っています（書き出した PC の辞書です）。`,
+          `例：${words
+            .slice(0, 5)
+            .map((w) => `${w.surface}（${w.pronunciation}）`)
+            .join('、')}${words.length > 5 ? ' など' : ''}`,
+          '',
+          'AivisSpeech の読みの辞書に追加しますか？（すでにある言葉は追加しません）',
+        ].join('\n'),
+      ),
+    )
     notify(
       needs.length
         ? `「${agent.name}」を読み込みました。素材のファイルは含まれていないため、${needs.join('・')}をご自分でご用意のうえ、追加してください`

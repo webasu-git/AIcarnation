@@ -13,18 +13,34 @@ API キーも `pnpm dev` も要りません。モデルの呼び出しは Claude
 
 必要なもの：
 
-- Claude Code（デスクトップアプリかターミナル版）
+- Claude Code（デスクトップアプリかターミナル版。入れるときはターミナルの `claude` コマンドを使います）
 - [Node.js](https://nodejs.org/) 18 以上（アバターの画面を出す小さなサーバーを動かすのに使います）
 - パソコンの Chrome か Edge（Safari は小窓の機能が限られます。Firefox とスマートフォンには対応していません）
 
-Claude Code で次の2つを実行し、Claude Code を開き直してください。
+入れ方は、次の3つの手順です。**手順 3 の再読み込みは必ず行ってください**（行わないと、入れたプラグインが Claude Code に反映されません）。
+
+**1. ターミナルで、次の2つを順に実行する**（Mac はターミナル.app、Windows は PowerShell）
 
 ```
-/plugin marketplace add webasu-git/AIcarnation
-/plugin install aicarnation@aicarnation
+claude plugin marketplace add webasu-git/AIcarnation
 ```
 
-開き直したら `/aicarnation` でアバターの画面が開きます（下の「使い方」）。
+```
+claude plugin install aicarnation@aicarnation
+```
+
+**2. Claude Code を開く**（デスクトップアプリの「Code」か、ターミナル版）
+
+**3. Claude Code で、プラグインを再読み込みする**
+
+```
+/reload-plugins
+```
+
+- 手順 1 は、必ずターミナルで実行してください。Claude のデスクトップアプリの中で `/plugin` と打つと、プラグインを選ぶ画面に切り替わり、コマンドとしては動きません。ターミナルで入れたプラグインは、デスクトップアプリでもそのまま使えます（設定を共有しています）。
+- `claude: command not found` と出る場合は、ターミナル版の Claude Code を入れてください（[Claude Code の入れ方](https://code.claude.com/docs/en/setup)）。
+
+再読み込みしたら `/aicarnation` でアバターの画面が開きます（下の「使い方」）。
 
 ## このプラグインがすること
 
@@ -136,7 +152,7 @@ AivisSpeech は、起動するたびに標準の声（コハク・まお）を A
 
 ## Claude Desktop のチャットで使う（試作）
 
-Claude Desktop のチャットには会話を外に知らせる仕組みが無いので、MCP サーバー（`mcp/aicarnation-mcp.mjs`）を登録し、Claude にツールを呼んでもらいます。
+Claude Code のプラグインを入れただけでは、Claude Desktop のチャットにはアバターが反応しません。Claude Desktop のチャットには会話を外に知らせる仕組みが無いので、MCP サーバーを Claude Desktop に登録し、Claude にツールを呼んでもらいます。
 
 | ツール | Claude が呼ぶとき | すること |
 |---|---|---|
@@ -146,15 +162,25 @@ Claude Desktop のチャットには会話を外に知らせる仕組みが無�
 
 チャットにはいつもどおり返答の全文が残り、アバターは要約だけを話します。
 
-登録は Claude Desktop の設定ファイル（Windows：`%APPDATA%\Claude\claude_desktop_config.json`、mac：`~/Library/Application Support/Claude/claude_desktop_config.json`）に書き、Claude Desktop を再起動します。
+登録のしかた（最初に一度だけ）：
 
-```json
-{
-  "mcpServers": {
-    "aicarnation": { "command": "node", "args": ["<このフォルダの絶対パス>/mcp/aicarnation-mcp.mjs"] }
-  }
-}
-```
+1. Claude Code で、次のコマンドを実行します。登録する内容と、書き換える Claude Desktop の設定ファイルが表示されます（この時点では何も書き換えません）。
+
+   ```
+   /aicarnation-desktop
+   ```
+
+2. 内容を確かめて、次のコマンドで登録します。
+
+   ```
+   /aicarnation-desktop yes
+   ```
+
+3. Claude Desktop を開き直し、チャットで「アバターを開いて」と頼みます。
+
+- 登録するときは、書き換える前の設定ファイルを同じフォルダに控えとして残し、`mcpServers` の `aicarnation` の項目だけを足します（ほかの設定には触りません）。
+- 登録するのは、保存先フォルダに置かれる入口（`claude-desktop-mcp.mjs`）です。プラグインを更新しても場所が変わらないので、登録し直す必要はありません（入口は、Claude Code のセッションのたびにプラグインが作り直します）。
+- 一度登録すれば、Claude Code の `/aicarnation` で開いても、チャットの「アバターを開いて」で開いても、同じアバターが両方の会話に反応します。
 
 - 画面と同梱サーバーは Claude Code 版と共通です。Claude Code が起動していればそのサーバーを使い、いなければ MCP サーバーが起動します（Claude Desktop を閉じると止まります）。合言葉は保存先の `token` で共通なので、サーバーが入れ替わっても開いている画面はそのままつながり直します。
 - Claude がツールを呼ぶかどうかはモデルしだいで、呼び忘れることがあります。確実にしたいときは、プロジェクトの指示に「返答のたびに aicarnation_say を呼ぶ」と書いてください。ツールの呼び出しはチャットの利用量を少し使います。
