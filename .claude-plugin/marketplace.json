@@ -1,0 +1,19 @@
+{
+  "name": "aicarnation",
+  "owner": {
+    "name": "webasu"
+  },
+  "metadata": {
+    "description": "AIcarnation：Claude Code と Claude Desktop での会話に、3D アバター（VRM）が表情・動き・声で反応します（日本語のみ）。"
+  },
+  "plugins": [
+    {
+      "name": "aicarnation",
+      "source": "./plugins/aicarnation",
+      "description": "Claude Code で話している間、横の小窓の 3D アバター（VRM）が表情・動き・読み上げで反応します（日本語のみ）。",
+      "version": "0.1.0",
+      "license": "MIT",
+      "keywords": ["avatar", "vrm", "voice", "japanese"]
+    }
+  ]
+}

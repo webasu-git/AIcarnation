@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+*.log
+.DS_Store
+Thumbs.db
+# Claude Code が mod の隣に書く型定義（自動生成）
+.claude-plugin/types/

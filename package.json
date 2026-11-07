@@ -1,0 +1,26 @@
+{
+  "name": "aicarnation",
+  "private": true,
+  "license": "MIT",
+  "packageManager": "pnpm@10.34.7",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter ./apps/* dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "pnpm": "10.34.7",
+    "typescript": "^6.0.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ],
+    "overrides": {
+      "undici@>=7.0.0 <7.30.1": "^7.30.1",
+      "zod@>=4.0.0 <4.6.6": "^4.6.6"
+    }
+  }
+}

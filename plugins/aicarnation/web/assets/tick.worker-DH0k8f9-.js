@@ -1,0 +1,1 @@
+(function(){let e;self.onmessage=t=>{clearInterval(e),e=void 0,t.data!==`stop`&&(e=setInterval(()=>self.postMessage(0),1e3/t.data.fps))}})();

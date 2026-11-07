@@ -1,0 +1,4 @@
+# .dev.vars にコピーして値を入れる（.dev.vars は gitignore 済み）
+ANTHROPIC_API_KEY=
+# API キー無しで画面を確かめるときは true（感情タグ付きの定型文を返す）
+MOCK_CLAUDE=false

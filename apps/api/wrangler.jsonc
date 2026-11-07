@@ -1,0 +1,20 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "aicarnation-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "vars": {
+    // カンマ区切り。本番では自アプリのオリジンだけにする
+    "ALLOWED_ORIGINS": "http://localhost:5173",
+    "CHAT_MODEL": "claude-haiku-5-5",
+    "GENERATE_MODEL": "claude-sonnet-5-5",
+    // 匿名IDごとの1日あたり会話回数の上限
+    "DAILY_CHAT_LIMIT": "100"
+  },
+  // database_id / id はデプロイ時に `wrangler d1 create` / `wrangler kv namespace create` の値に差し替える
+  "d1_databases": [
+    { "binding": "DB", "database_name": "aicarnation", "database_id": "local", "migrations_dir": "migrations" }
+  ],
+  "kv_namespaces": [{ "binding": "USAGE", "id": "local" }]
+}
