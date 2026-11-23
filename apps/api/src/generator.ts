@@ -8,7 +8,8 @@ export interface GenerateInput {
 
 /** エージェント定義の生成。テストではモックに差し替える */
 export interface AgentGenerator {
-  generate(input: GenerateInput): Promise<GeneratedAgent>
+  /** signal は、利用者が接続を切ったときに呼び出しを止めるためのもの */
+  generate(input: GenerateInput, signal?: AbortSignal): Promise<GeneratedAgent>
 }
 
 /** Claude が拒否した、または定義として使えない出力を返したとき */
@@ -82,7 +83,7 @@ export function finalizeGenerated(raw: unknown): GeneratedAgent {
 export function createClaudeGenerator(apiKey: string, model: string): AgentGenerator {
   const client = new Anthropic({ apiKey })
   return {
-    async generate({ description, images }) {
+    async generate({ description, images }, signal) {
       const message = await client.beta.messages.create({
         model,
         max_tokens: 16000,
@@ -104,7 +105,7 @@ export function createClaudeGenerator(apiKey: string, model: string): AgentGener
         // 安全分類器に誤って拒否されたとき、サーバー側で別モデルに回す
         betas: ['server-side-fallback-2026-07-01'],
         fallbacks: 'default',
-      })
+      }, { signal })
       if (message.stop_reason === 'refusal') {
         throw new GenerationError('refusal', 'この説明からは作れませんでした')
       }

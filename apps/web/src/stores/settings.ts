@@ -25,6 +25,15 @@ export const useSettingsStore = defineStore('settings', () => {
   /** 会話していないときの身ぶりの多さと、居眠りするか */
   const idleGestures = ref<IdleGestureLevel>('normal')
   const dozeEnabled = ref(true)
+  /** 会話の記録（同梱版）。記録は同梱サーバーが保存先フォルダに残す。既定はオフ */
+  const conversationLog = ref(false)
+  const conversationLogDays = ref(30)
+  /** 放置中の逆提案（同梱版）と、話しかけるまでの時間（分）。既定はオフ */
+  const proactiveEnabled = ref(false)
+  const proactiveAfterMin = ref(5)
+  /** 逆提案の材料に Claude Code のセッション記録（すべてのプロジェクトの最近のもの）も使うか（既定はオフ）と、読ませないフォルダ */
+  const proactiveSessions = ref(false)
+  const proactiveSessionExclude = ref<string[]>([])
   /** 保存した設定を読み終えたか（読み込みでの変化は、保存も知らせもしない） */
   const loaded = ref(false)
 
@@ -40,6 +49,12 @@ export const useSettingsStore = defineStore('settings', () => {
     theme.value = (await getSetting('theme')) ?? initialTheme()
     idleGestures.value = (await getSetting('idleGestures')) ?? 'normal'
     dozeEnabled.value = (await getSetting('dozeEnabled')) ?? true
+    conversationLog.value = (await getSetting('conversationLog')) ?? false
+    conversationLogDays.value = (await getSetting('conversationLogDays')) ?? 30
+    proactiveEnabled.value = (await getSetting('proactiveEnabled')) ?? false
+    proactiveAfterMin.value = (await getSetting('proactiveAfterMin')) ?? 5
+    proactiveSessions.value = (await getSetting('proactiveSessions')) ?? false
+    proactiveSessionExclude.value = (await getSetting('proactiveSessionExclude')) ?? []
     loaded.value = true
   }
 
@@ -63,6 +78,30 @@ export const useSettingsStore = defineStore('settings', () => {
 
   watch(dozeEnabled, (value) => {
     if (loaded.value) void setSetting('dozeEnabled', value)
+  })
+
+  watch(conversationLog, (value) => {
+    if (loaded.value) void setSetting('conversationLog', value)
+  })
+
+  watch(conversationLogDays, (value) => {
+    if (loaded.value) void setSetting('conversationLogDays', value)
+  })
+
+  watch(proactiveEnabled, (value) => {
+    if (loaded.value) void setSetting('proactiveEnabled', value)
+  })
+
+  watch(proactiveSessions, (value) => {
+    if (loaded.value) void setSetting('proactiveSessions', value)
+  })
+
+  watch(proactiveSessionExclude, (value) => {
+    if (loaded.value) void setSetting('proactiveSessionExclude', [...value])
+  })
+
+  watch(proactiveAfterMin, (value) => {
+    if (loaded.value) void setSetting('proactiveAfterMin', value)
   })
 
   watch(captionMode, (value) => {
@@ -102,6 +141,12 @@ export const useSettingsStore = defineStore('settings', () => {
     theme,
     idleGestures,
     dozeEnabled,
+    conversationLog,
+    conversationLogDays,
+    proactiveEnabled,
+    proactiveAfterMin,
+    proactiveSessions,
+    proactiveSessionExclude,
     loaded,
     load,
   }

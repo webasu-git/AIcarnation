@@ -240,6 +240,13 @@ export const useChatStore = defineStore('chat', () => {
   /** 「聞いている」から「考えている」に移るまでの時間 */
   const LISTEN_TO_THINK_MS = 1200
   let thinkTimer: number | undefined
+  /**
+   * 「まとめています」を出しておく時間の上限。要約は数秒で終わる。
+   * 要約の途中で Claude Code のセッションが閉じた・mod が読み込み直された・要約に失敗したときは、
+   * 終わりの合図（返事か待機）が届かないので、時間がたったら待機に戻す（表示が残り続けないように）
+   */
+  const SUMMARY_TIMEOUT_MS = 60_000
+  let summaryTimer: number | undefined
 
   /** Claude Code の mod から届いた合図に合わせて、アバターを反応させる */
   async function handleBridgeEvent(event: BridgeEvent) {
@@ -253,6 +260,7 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
     win.clearTimeout(thinkTimer)
+    win.clearTimeout(summaryTimer)
     switch (event.type) {
       case 'listening':
         // 話しかけられたら、前の返答の読み上げはやめて、うなずいて聞く。少ししたら考える姿勢に移る
@@ -274,6 +282,13 @@ export const useChatStore = defineStore('chat', () => {
         bridgeStatus.value = event.label
         // 要約を作っている間は考える姿勢、ツールを使っている間は作業の姿勢
         if (!activePerformer) control.setMotion(event.label === 'まとめています' ? 'thinking' : 'working')
+        if (event.label === 'まとめています') {
+          summaryTimer = win.setTimeout(() => {
+            if (bridgeStatus.value !== 'まとめています') return
+            bridgeStatus.value = ''
+            if (!activePerformer) control.setMotion('idle')
+          }, SUMMARY_TIMEOUT_MS)
+        }
         notifyActivity(event)
         return
       case 'idle':

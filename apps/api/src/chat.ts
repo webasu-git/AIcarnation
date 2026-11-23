@@ -10,6 +10,7 @@ import {
 import type { AppEnv, Env } from './env'
 import { classifyClaudeError, type ChatModel } from './claude'
 import { withGuard } from './guard'
+import { logId } from './log'
 import { USAGE_LIMIT_MESSAGE, getUsage, nextResetJst, reserveUsage } from './usage'
 
 /** リクエストを検証する。問題があれば理由を返す */
@@ -47,9 +48,9 @@ async function send(stream: SSEStreamingApi, e: ChatStreamEvent): Promise<void> 
   await stream.writeSSE({ event: e.event, data: JSON.stringify(e.data) })
 }
 
-/** ログには会話本文を残さない（匿名ID・時刻・トークン数のみ） */
-function logUsage(anonId: string, inputTokens: number, outputTokens: number) {
-  console.log(JSON.stringify({ type: 'chat', anonId, at: new Date().toISOString(), inputTokens, outputTokens }))
+/** ログには会話本文を残さない（利用者の印・時刻・トークン数のみ。匿名 ID そのものは出さない） */
+async function logUsage(anonId: string, inputTokens: number, outputTokens: number) {
+  console.log(JSON.stringify({ type: 'chat', user: await logId(anonId), at: new Date().toISOString(), inputTokens, outputTokens }))
 }
 
 export function chatRoutes(getModel: (env: Env) => ChatModel) {
@@ -83,11 +84,11 @@ export function chatRoutes(getModel: (env: Env) => ChatModel) {
         } else {
           await send(stream, { event: 'done', data: { stopReason: result.stopReason } })
         }
-        logUsage(anonId, result.inputTokens, result.outputTokens)
+        await logUsage(anonId, result.inputTokens, result.outputTokens)
       } catch (err) {
         const code = classifyClaudeError(err)
         const message = code === 'upstream_busy' ? '混み合っています。少し待ってから送ってください' : '応答を作れませんでした'
-        console.log(JSON.stringify({ type: 'chat_error', anonId, at: new Date().toISOString(), code }))
+        console.log(JSON.stringify({ type: 'chat_error', user: await logId(anonId), at: new Date().toISOString(), code }))
         await send(stream, { event: 'error', data: { code, message } })
       }
     })

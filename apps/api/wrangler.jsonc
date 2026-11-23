@@ -3,6 +3,8 @@
   "name": "aicarnation-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
+  // 利用者が接続を切ったら、リクエストの signal で分かるようにする（モデルの呼び出しを止めるのに使う）
+  "compatibility_flags": ["enable_request_signal"],
   "observability": { "enabled": true },
   "vars": {
     // カンマ区切り。本番では自アプリのオリジンだけにする
@@ -12,9 +14,8 @@
     // 匿名IDごとの1日あたり会話回数の上限
     "DAILY_CHAT_LIMIT": "100"
   },
-  // database_id / id はデプロイ時に `wrangler d1 create` / `wrangler kv namespace create` の値に差し替える
+  // database_id はデプロイ時に `wrangler d1 create` の値に差し替える
   "d1_databases": [
     { "binding": "DB", "database_name": "aicarnation", "database_id": "local", "migrations_dir": "migrations" }
-  ],
-  "kv_namespaces": [{ "binding": "USAGE", "id": "local" }]
+  ]
 }

@@ -7,6 +7,7 @@ import type {
 } from '@aicarnation/shared'
 import { ApiError, apiFetch, errorFromResponse } from './client'
 import { IS_COMPANION, companionHeaders } from '../runtime'
+import type { Suggestion } from '../behavior/proactive'
 
 /**
  * 同梱版では、モデルを使う依頼を同梱サーバー経由で Claude Code（mod）に頼む。
@@ -76,4 +77,19 @@ export async function deleteRemoteAgent(id: string): Promise<void> {
   if (IS_COMPANION) return
   const res = await apiFetch(`/agents/${encodeURIComponent(id)}`, { method: 'DELETE' })
   if (!res.ok) throw await errorFromResponse(res)
+}
+
+/** 放置中の逆提案を作ってもらう（同梱版だけ。材料はサーバーが集め、Claude Code のモデルが答える） */
+export function suggestProactive(): Promise<Suggestion> {
+  if (!IS_COMPANION) return Promise.reject(new ApiError('not_found', '逆提案は同梱版でのみ使えます'))
+  return askCompanion('suggest-proactive', null)
+}
+
+/** 逆提案を話したことを知らせる（提案の記録に残る）。失敗しても何もしない */
+export function reportProactiveSpoken(id: string): void {
+  void fetch('/companion/proactive/spoken', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...companionHeaders() },
+    body: JSON.stringify({ id }),
+  }).catch(() => undefined)
 }

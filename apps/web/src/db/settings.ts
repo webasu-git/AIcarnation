@@ -20,6 +20,18 @@ export interface Settings {
   idleGestures: IdleGestureLevel
   /** 長く話しかけないと居眠りするか */
   dozeEnabled: boolean
+  /** 会話（発言と返事）を手元に記録するか（同梱版。放置中の逆提案の材料。既定はオフ） */
+  conversationLog: boolean
+  /** 会話の記録を残す日数 */
+  conversationLogDays: number
+  /** 放置中に、アバターから続きを提案するか（同梱版。会話の記録が要る。既定はオフ） */
+  proactiveEnabled: boolean
+  /** 話しかけるまでの放置の時間（分） */
+  proactiveAfterMin: number
+  /** 逆提案の材料に、Claude Code のセッション記録（発言と最後の返事）も使うか（既定はオフ） */
+  proactiveSessions: boolean
+  /** セッション記録を読ませないプロジェクトのフォルダ（とその下。書かなければ、すべてのプロジェクトの最近の記録を見る） */
+  proactiveSessionExclude: string[]
 }
 
 /** 会話していないときの身ぶりの多さ：多め／ふつう／少なめ／しない */

@@ -65,14 +65,16 @@ export const useAgentsStore = defineStore('agents', () => {
   }
 
   async function load() {
-    agents.value = await loadAgents()
-    if (agents.value.length === 0) {
+    // 一覧と「どれを選んでいたか」は、両方読み終えてから同時に入れる。
+    // 一覧だけ先に入れると、その間は先頭のキャラクターが選択中に見え、先頭の見た目・履歴・動きを読み始めてしまう
+    const [list, saved] = await Promise.all([loadAgents(), getSetting('currentAgentId')])
+    if (list.length === 0) {
       const first = createDefaultAgent(NO_VRM)
       await persist(first)
-      agents.value = [first]
+      list.push(first)
     }
-    const saved = await getSetting('currentAgentId')
-    currentId.value = agents.value.some((a) => a.id === saved) ? (saved as string) : (agents.value[0]?.id ?? '')
+    currentId.value = list.some((a) => a.id === saved) ? (saved as string) : (list[0]?.id ?? '')
+    agents.value = list
   }
 
   async function select(id: string) {

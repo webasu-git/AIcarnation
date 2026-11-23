@@ -24,7 +24,7 @@ import { useVrmLoader } from './useVrmLoader'
 import { useBridge } from './bridge/useBridge'
 import { useBehavior } from './behavior/useBehavior'
 import { useMotionLibrary } from './motion/useMotionLibrary'
-import { IS_COMPANION, isCompanionSessionValid } from './runtime'
+import { IS_COMPANION, companionHeaders, isCompanionSessionValid } from './runtime'
 import { useSettingsStore } from './stores/settings'
 import { useChatStore } from './stores/chat'
 import { useAgentsStore } from './stores/agents'
@@ -108,6 +108,67 @@ const IDLE_GESTURE_OPTIONS = [
   { value: 'less', label: '少なめ' },
   { value: 'off', label: 'しない' },
 ] as const
+/** 会話の記録を残す日数（切り替えボタンは文字で扱う） */
+const LOG_DAYS_OPTIONS = [
+  { value: '7', label: '7 日' },
+  { value: '30', label: '30 日' },
+  { value: '90', label: '90 日' },
+] as const
+/** 放置してから話しかけるまでの時間 */
+const PROACTIVE_AFTER_OPTIONS = [
+  { value: '5', label: '5 分' },
+  { value: '10', label: '10 分' },
+  { value: '20', label: '20 分' },
+] as const
+const proactiveAfterMin = computed({
+  get: () => String(settings.proactiveAfterMin),
+  set: (v: string) => {
+    settings.proactiveAfterMin = Number(v)
+  },
+})
+/** セッション記録を読ませないフォルダの上限 */
+const MAX_EXCLUDED_FOLDERS = 50
+/** フォルダを選ぶ窓を開いている最中か（開いている間は、もう一度開かない） */
+const pickingFolder = ref(false)
+const pickFolderError = ref('')
+/**
+ * 読ませないフォルダを足す。フォルダを選ぶ窓（OS のもの）は、同じ PC で動いている同梱サーバーが開く
+ * （ブラウザの画面からは、選んだフォルダの場所が分からないため）。文字で入力はさせない
+ */
+async function addExcludedFolder() {
+  if (pickingFolder.value) return
+  pickingFolder.value = true
+  pickFolderError.value = ''
+  try {
+    const res = await fetch('/companion/pick-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...companionHeaders() },
+      body: JSON.stringify({ prompt: 'Claude Code の作業の記録を読ませないフォルダを選んでください' }),
+    })
+    const body = (await res.json().catch(() => null)) as { path?: string | null; message?: string } | null
+    if (!res.ok) {
+      pickFolderError.value = body?.message ?? 'フォルダを選ぶ窓を開けませんでした'
+      return
+    }
+    const path = body?.path
+    // 選ばなかった・もう入っているものは足さない
+    if (!path || settings.proactiveSessionExclude.includes(path)) return
+    settings.proactiveSessionExclude = [...settings.proactiveSessionExclude, path].slice(0, MAX_EXCLUDED_FOLDERS)
+  } catch {
+    pickFolderError.value = 'フォルダを選ぶ窓を開けませんでした'
+  } finally {
+    pickingFolder.value = false
+  }
+}
+function removeExcludedFolder(path: string) {
+  settings.proactiveSessionExclude = settings.proactiveSessionExclude.filter((p) => p !== path)
+}
+const conversationLogDays = computed({
+  get: () => String(settings.conversationLogDays),
+  set: (v: string) => {
+    settings.conversationLogDays = Number(v)
+  },
+})
 /** 画面のテーマ。システムはブラウザ（OS）の明るい・暗いに合わせる */
 const THEME_OPTIONS = [
   { value: 'system', label: 'システム' },
@@ -417,6 +478,53 @@ function clearHistory() {
             </div>
             <ToggleSwitch v-model="settings.dozeEnabled">長く話しかけないと居眠りする</ToggleSwitch>
             <p class="hint">会話していない間に、見回す・ほほえむなどの身ぶりをする多さです。作業中に気になる場合は「少なめ」か「しない」をお選びください。居眠りは、30 分ほど話しかけないと始まります。</p>
+            <template v-if="IS_COMPANION">
+              <ToggleSwitch v-model="settings.conversationLog">会話を記録する</ToggleSwitch>
+              <div v-if="settings.conversationLog" class="field">
+                <span>記録を残す日数</span>
+                <SegmentedControl v-model="conversationLogDays" :options="LOG_DAYS_OPTIONS" label="会話の記録を残す日数" />
+              </div>
+              <p class="hint">
+                Claude Code・Claude Desktop のチャットでの発言と、アバターが話した返事を、この PC の保存先フォルダ（logs/conversation）に日付ごとに残します。外へは送りません。放置しているときに、アバターから続きを提案する機能（下の「放置中にアバターから話しかける」）の材料にします。残す日数を過ぎた記録は自動で消えます。
+              </p>
+              <ToggleSwitch v-model="settings.proactiveEnabled" :disabled="!settings.conversationLog">放置中にアバターから話しかける</ToggleSwitch>
+              <div v-if="settings.proactiveEnabled && settings.conversationLog" class="field">
+                <span>話しかけるまでの時間</span>
+                <SegmentedControl v-model="proactiveAfterMin" :options="PROACTIVE_AFTER_OPTIONS" label="放置してから話しかけるまでの時間" />
+              </div>
+              <p class="hint">
+                しばらく操作が無いと、会話の記録をもとに、止まっている作業の続きなどをアバターが提案します。提案は、動いている Claude Code（ご自身のログイン）のモデルが作ります。会話の記録がオンで、Claude Code が動いているときだけ働きます。話しかけるのは、操作が止まって上の時間がたったときに 1 度だけです（次に操作してまた止まると、もう一度話しかけます）。
+              </p>
+              <p class="hint notice">
+                話しかけるたびに（提案が無いと判断したときも）、Claude Code のモデルを 1 回呼びます。そのぶん、Claude Code の利用枠を使います。気になるときは、話しかけるまでの時間を長めにお選びください。
+              </p>
+              <template v-if="settings.proactiveEnabled && settings.conversationLog">
+                <ToggleSwitch v-model="settings.proactiveSessions">Claude Code の作業の記録も材料にする</ToggleSwitch>
+                <p class="hint">
+                  オンにすると、どのフォルダで作業していても、Claude Code での最近の作業（ご自身の発言と、Claude の最後の返事。直近 30 往復ほど）を見渡して、提案の材料に加えます。フォルダの指定は要りません。API キーなどの秘密らしき文字列は伏せてから渡します。
+                </p>
+                <details v-if="settings.proactiveSessions" class="folder-list">
+                  <summary>読ませないフォルダ（{{ settings.proactiveSessionExclude.length }}）</summary>
+                  <p class="hint">ここに足したフォルダと、その下のフォルダでの作業は読みません。</p>
+                  <ul v-if="settings.proactiveSessionExclude.length > 0">
+                    <li v-for="path in settings.proactiveSessionExclude" :key="path">
+                      <span class="folder-path" :title="path"><bdi>{{ path }}</bdi></span>
+                      <button type="button" class="icon-button" :aria-label="`${path} を外す`" title="外す" @click="removeExcludedFolder(path)">
+                        <AppIcon name="trash" :size="14" />
+                      </button>
+                    </li>
+                  </ul>
+                  <button
+                    type="button"
+                    :disabled="pickingFolder || settings.proactiveSessionExclude.length >= MAX_EXCLUDED_FOLDERS"
+                    @click="addExcludedFolder"
+                  >
+                    <AppIcon name="plus" :size="14" />{{ pickingFolder ? 'フォルダを選ぶ窓を開いています…' : 'フォルダを選んで追加' }}
+                  </button>
+                  <p v-if="pickFolderError" class="hint" role="alert">{{ pickFolderError }}</p>
+                </details>
+              </template>
+            </template>
             <template v-if="!IS_COMPANION">
               <div v-if="usage" class="meter">
                 <div class="meter-label">
@@ -654,6 +762,15 @@ function clearHistory() {
   opacity: 0.6;
 }
 
+/* 説明文のうち、利用者に意識してほしい注意書き（Claude Code の利用枠を使う、など） */
+.hint.notice {
+  padding: 8px 10px;
+  border-left: 3px solid var(--warning);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--surface);
+  color: var(--text);
+}
+
 /* --- 声と会話 --- */
 .field {
   display: flex;
@@ -662,6 +779,53 @@ function clearHistory() {
   margin-top: 8px;
   font-size: 0.82rem;
   color: var(--muted);
+}
+/* 開閉式のフォルダの一覧（読ませないフォルダ） */
+.folder-list {
+  margin-top: 8px;
+  font-size: 0.82rem;
+}
+.folder-list summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding: 4px 0;
+}
+.folder-list ul {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.folder-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.folder-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 長い場所は、終わり（フォルダの名前）が見えるように左側を省く */
+  direction: rtl;
+  text-align: left;
+}
+.folder-list .icon-button {
+  flex: none;
+  padding: 4px;
+  line-height: 0;
+}
+/* 「フォルダを選んで追加」：プラスのアイコンと文字の高さを、真ん中でそろえる（ほかのアイコン付きのボタンと同じ） */
+.folder-list > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 .meter {
   margin-top: 14px;

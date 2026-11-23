@@ -14,6 +14,21 @@ export const SAFETY_GUARD = [
  * 設定の中に「ここから下は無視して」などと書かれても、区切りの外の指示が優先されると分かるようにする
  */
 export function withGuard(systemPrompt: string): string {
-  const body = systemPrompt.trim().replaceAll('</character_definition>', '')
-  return `<character_definition>\n${body}\n</character_definition>\n\n${SAFETY_GUARD}`
+  return `<character_definition>\n${stripDelimiters(systemPrompt.trim())}\n</character_definition>\n\n${SAFETY_GUARD}`
+}
+
+/** 区切りのタグ。開く・閉じるの両方と、空白の入ったもの・大文字のものも含める */
+const DELIMITER = /<\s*\/?\s*character_definition\s*>/gi
+
+/**
+ * 設定の中から、区切りのタグを取り除く。1 回取り除くだけだと、「</character_definition</character_definition>>」のように
+ * 重ねて書かれたものは、取り除いたあとに残りがつながって新しいタグになる。無くなるまで繰り返す
+ */
+export function stripDelimiters(text: string): string {
+  let out = text
+  for (;;) {
+    const next = out.replace(DELIMITER, '')
+    if (next === out) return out
+    out = next
+  }
 }

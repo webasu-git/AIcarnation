@@ -12,9 +12,9 @@
  * - 書き換える前の設定ファイルを控えに残し、mcpServers.aicarnation だけを足す（あれば入れ替える）。ほかの設定には触らない
  */
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -122,11 +122,26 @@ if (remove) {
   servers.aicarnation = entry
 }
 
-// 書き換える前の設定ファイルを控えに残してから書く
+// 書き換える前の設定ファイルを控えに残してから書く。
+// 設定ファイルには、ほかの MCP サーバーの API キーが書かれていることがある。控えは自分だけが読めるようにし、
+// 新しいほうから KEEP_BACKUPS 個だけ残す（古い控えに、あとで消した・差し替えたキーが残り続けないように）
+const KEEP_BACKUPS = 3
+const BACKUP_PREFIX = `${basename(file)}.aicarnation-backup-`
 let backup = ''
 if (text !== null) {
-  backup = `${file}.aicarnation-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`
+  backup = join(dirname(file), `${BACKUP_PREFIX}${new Date().toISOString().replace(/[:.]/g, '-')}`)
   copyFileSync(file, backup)
+  try {
+    chmodSync(backup, 0o600)
+    // 名前の日時は、文字の順に並べると古い順になる
+    const old = readdirSync(dirname(file))
+      .filter((name) => name.startsWith(BACKUP_PREFIX))
+      .sort()
+      .slice(0, -KEEP_BACKUPS)
+    for (const name of old) unlinkSync(join(dirname(file), name))
+  } catch {
+    // 控えの整理に失敗しても、登録は続ける
+  }
 }
 writeFileSync(file, `${JSON.stringify({ ...config, mcpServers: servers }, null, 2)}\n`)
 

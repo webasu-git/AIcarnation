@@ -1,6 +1,5 @@
 export interface Env {
   DB: D1Database
-  USAGE: KVNamespace
   ALLOWED_ORIGINS: string
   CHAT_MODEL: string
   GENERATE_MODEL: string

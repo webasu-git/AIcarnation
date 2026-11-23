@@ -183,8 +183,11 @@ function personaText(persona) {
 
 async function openBrowser(url) {
   if (process.env.AICARNATION_NO_OPEN === '1') return
+  // システムのものを名指しで動かす（名前だけで呼ぶと、Windows では作業フォルダに置かれた同名の cmd.exe が先に動く）
   const [cmd, args] =
-    process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]]
+    process.platform === 'win32'
+      ? [join(process.env.SystemRoot ?? 'C:/Windows', 'System32', 'cmd.exe'), ['/c', 'start', '', url]]
+      : [process.platform === 'darwin' ? '/usr/bin/open' : 'xdg-open', [url]]
   spawn(cmd, args, { stdio: 'ignore', detached: true }).unref()
 }
 
@@ -321,7 +324,7 @@ async function handle(message) {
       return reply(id, {
         protocolVersion: params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
-        serverInfo: { name: APP, version: '0.1.2' },
+        serverInfo: { name: APP, version: '0.1.3' },
         ...(quiet ? {} : { instructions: INSTRUCTIONS }),
       })
     }

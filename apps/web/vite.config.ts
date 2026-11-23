@@ -3,16 +3,22 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { aicarnationDevBridge } from './bridge/vitePlugin'
 import { thirdPartyNotices } from './bridge/thirdPartyNotices'
+import { isCrossSite } from './bridge/sameOrigin'
+
+const DEV_PORT = 5173
+/** ほかのサイトからの呼び出しは中継しない（false を返すと 404 になる）。中継は Origin を外すので、ここで断る */
+const sameSiteOnly = (req: { headers: Record<string, string | string[] | undefined> }) => (isCrossSite(req.headers, DEV_PORT) ? false : undefined)
 
 export default defineConfig({
   plugins: [vue(), aicarnationDevBridge(), thirdPartyNotices()],
   server: {
-    port: 5173,
+    port: DEV_PORT,
     strictPort: true,
     proxy: {
       // 中継API（wrangler dev）へ流す。ブラウザから見ると同一オリジンなので、Origin ヘッダーは外して中継する
       '/api': {
         target: 'http://localhost:8787',
+        bypass: sameSiteOnly,
         rewrite: (path) => path.replace(/^\/api/, ''),
         configure: (proxy) => {
           proxy.on('proxyReq', (req) => req.removeHeader('origin'))
@@ -21,6 +27,7 @@ export default defineConfig({
       // ローカル音声エンジン。エンジン側の CORS 設定に左右されないよう、同一オリジンで中継する
       '/tts/aivis': {
         target: 'http://127.0.0.1:10101',
+        bypass: sameSiteOnly,
         rewrite: (path) => path.replace(/^\/tts\/aivis/, ''),
         configure: (proxy) => {
           proxy.on('proxyReq', (req) => req.removeHeader('origin'))

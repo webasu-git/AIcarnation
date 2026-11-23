@@ -17,6 +17,9 @@ import { classifyClaudeError } from './claude'
 import { GenerationError, type AgentGenerator, type GenerateInput } from './generator'
 import { fallbackVoice, type VoiceSuggester } from './voice'
 import { USAGE_LIMIT_MESSAGE, nextResetJst, reserveUsage, reserveVoiceSuggestion } from './usage'
+import { logId } from './log'
+/** 画面が作るエージェントの id の形（crypto.randomUUID） */
+const AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; reason: string }
 
@@ -94,15 +97,16 @@ export function agentRoutes(getGenerator: (env: Env) => AgentGenerator, getVoice
     }
 
     try {
-      const agent = await getGenerator(c.env).generate(parsed.value)
-      console.log(JSON.stringify({ type: 'generate', anonId, at: new Date().toISOString(), images: parsed.value.images.length }))
+      // 利用者が接続を切ったら、モデルの呼び出しも止める（回数は先に数えてあるので、上限のすり抜けにはならない）
+      const agent = await getGenerator(c.env).generate(parsed.value, c.req.raw.signal)
+      console.log(JSON.stringify({ type: 'generate', user: await logId(anonId), at: new Date().toISOString(), images: parsed.value.images.length }))
       return c.json(agent)
     } catch (err) {
       if (err instanceof GenerationError) {
         return c.json({ code: err.code, message: err.message }, err.code === 'refusal' ? 422 : 502)
       }
       const code = classifyClaudeError(err)
-      console.log(JSON.stringify({ type: 'generate_error', anonId, at: new Date().toISOString(), code }))
+      console.log(JSON.stringify({ type: 'generate_error', user: await logId(anonId), at: new Date().toISOString(), code }))
       return c.json(
         { code, message: code === 'upstream_busy' ? '混み合っています。少し待ってから試してください' : '定義を作れませんでした' },
         code === 'upstream_busy' ? 503 : 502,
@@ -121,11 +125,11 @@ export function agentRoutes(getGenerator: (env: Env) => AgentGenerator, getVoice
       return c.json({ voiceURI: fallbackVoice(parsed.value), reason: '今日の推薦の上限に達したため、日本語の声を選びました' })
     }
     try {
-      return c.json(await getVoiceSuggester(c.env).suggest(parsed.value))
+      return c.json(await getVoiceSuggester(c.env).suggest(parsed.value, c.req.raw.signal))
     } catch (err) {
       // 推薦できなくても作成は続けられるよう、日本語の声を返す
       const code = classifyClaudeError(err)
-      console.log(JSON.stringify({ type: 'suggest_voice_error', anonId: c.get('anonId'), at: new Date().toISOString(), code }))
+      console.log(JSON.stringify({ type: 'suggest_voice_error', user: await logId(c.get('anonId')), at: new Date().toISOString(), code }))
       return c.json({ voiceURI: fallbackVoice(parsed.value), reason: '推薦できなかったため、日本語の声を選びました' })
     }
   })
@@ -156,6 +160,11 @@ export function agentRoutes(getGenerator: (env: Env) => AgentGenerator, getVoice
     const agent = definition as AgentDefinition
     if (agent.id !== c.req.param('id')) {
       return c.json({ code: 'invalid_request', message: 'id が一致しません' }, 400)
+    }
+    // id は画面が作る UUID だけを受け付ける。id は全利用者で 1 つの表の主キーなので、短い・決まった id を許すと、
+    // ほかの利用者が使いそうな id を先に取って、その人の同期を失敗させ続けることができる
+    if (!AGENT_ID.test(agent.id)) {
+      return c.json({ code: 'invalid_request', message: 'id の形が不正です' }, 400)
     }
 
     // 1人が同期できる数に上限を設ける（新しく足すときだけ数える）

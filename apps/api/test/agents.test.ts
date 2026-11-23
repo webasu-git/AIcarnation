@@ -156,6 +156,19 @@ describe('/agents/:id の同期', () => {
     const broken = put(anon, { ...agent, topics: 'x' as unknown as string[] })
     expect((await app.request(broken.path, broken, env)).status).toBe(400)
   })
+
+  it('UUID でない id は 400（短い id を先に取って、ほかの利用者の同期を妨げられないように）', async () => {
+    const app = appWith(okGenerator)
+    const anon = await registeredId(app)
+    for (const id of ['default', 'a', '12345678-1234-1234-1234-12345678901', 'x'.repeat(36)]) {
+      const req = put(anon, definition({ id }))
+      const res = await app.request(req.path, req, env)
+      expect(res.status, id).toBe(400)
+    }
+    // 形の正しい id は、今までどおり保存できる
+    const ok = put(anon, definition())
+    expect((await app.request(ok.path, ok, env)).status).toBe(200)
+  })
 })
 
 describe('/agents/generate の画像入力', () => {

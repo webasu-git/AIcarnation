@@ -3,7 +3,8 @@ import type { SuggestVoiceRequest, SuggestVoiceResponse } from '@aicarnation/sha
 
 /** 声の推薦。テストではモックに差し替える */
 export interface VoiceSuggester {
-  suggest(req: SuggestVoiceRequest): Promise<SuggestVoiceResponse>
+  /** signal は、利用者が接続を切ったときに呼び出しを止めるためのもの */
+  suggest(req: SuggestVoiceRequest, signal?: AbortSignal): Promise<SuggestVoiceResponse>
 }
 
 const SYSTEM_PROMPT = `あなたはキャラクターに合う読み上げ音声を選ぶアシスタントです。
@@ -18,7 +19,7 @@ export function fallbackVoice(req: SuggestVoiceRequest): string {
 export function createClaudeVoiceSuggester(apiKey: string, model: string): VoiceSuggester {
   const client = new Anthropic({ apiKey })
   return {
-    async suggest(req) {
+    async suggest(req, signal) {
       const message = await client.messages.create({
         model,
         max_tokens: 1024,
@@ -39,7 +40,7 @@ export function createClaudeVoiceSuggester(apiKey: string, model: string): Voice
             },
           },
         },
-      })
+      }, { signal })
       const text = message.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('')
       try {
         const parsed = JSON.parse(text) as Partial<SuggestVoiceResponse>

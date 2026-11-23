@@ -81,6 +81,11 @@ export function makeCharacterFile(agent: AgentDefinition, info: ExportInfo, now 
 
 const isString = (v: unknown): v is string => typeof v === 'string'
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every(isString)
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+/** 数で、min〜max に収まっているか（NaN・無限大は通さない） */
+const inRange = (v: unknown, min: number, max: number): v is number => isFiniteNumber(v) && v >= min && v <= max
+/** 色の番号（#rgb・#rrggbb・#rrggbbaa）。背景の色は、画面の色選びとこの形だけを使う */
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
 
 /** 読み込んだ JSON がキャラクターの書き出しファイルか確かめる。だめなら理由を投げる */
 export function parseCharacterFile(data: unknown): CharacterFile {
@@ -92,8 +97,20 @@ export function parseCharacterFile(data: unknown): CharacterFile {
     throw new Error('キャラクターの設定の形が正しくありません')
   }
   if (!c.name?.trim()) throw new Error('名前が空です')
-  const v = f.voice
-  if (!v || typeof v.rate !== 'number' || typeof v.pitch !== 'number') throw new Error('声の設定の形が正しくありません')
+  const v = f.voice as Partial<Record<string, unknown>> | undefined
+  // 声の数値は、画面で選べる範囲の数だけを受け付ける（0 や極端な値・数でない値が入ると、その声で話せなくなる）
+  if (
+    !v ||
+    !inRange(v.rate, 0.5, 2) ||
+    !inRange(v.pitch, 0, 2) ||
+    (v.intonation !== undefined && !inRange(v.intonation, 0, 2)) ||
+    (v.tempo !== undefined && !inRange(v.tempo, 0, 2)) ||
+    (v.emotional !== undefined && typeof v.emotional !== 'boolean') ||
+    (v.speaker !== undefined && !isString(v.speaker)) ||
+    (v.style !== undefined && !isString(v.style))
+  ) {
+    throw new Error('声の設定の形が正しくありません')
+  }
   if (f.vrmFileName !== null && !isString(f.vrmFileName)) throw new Error('VRM のファイル名の形が正しくありません')
   if (!Array.isArray(f.motions) || !f.motions.every((m) => isString(m?.role) && isString(m?.name))) {
     throw new Error('動きの割り当ての形が正しくありません')
@@ -105,15 +122,17 @@ export function parseCharacterFile(data: unknown): CharacterFile {
     throw new Error('読みの辞書の形が正しくありません')
   }
   const b = f.backdrop as Partial<Record<string, unknown>> | undefined
+  // 背景の色は、色の番号（#rrggbb など）だけを受け付ける。色はそのままスタイルに入るので、
+  // 文字列なら何でも通すと、url(…) を書いたファイルを読み込んだときに、外のサーバーへ通信させられる
   if (
     b !== undefined &&
-    !(b.kind === 'color' && isString(b.color)) &&
+    !(b.kind === 'color' && isString(b.color) && HEX_COLOR.test(b.color)) &&
     !(b.kind === 'image' && isString(b.name) && (b.media === 'image' || b.media === 'video'))
   ) {
     throw new Error('背景の形が正しくありません')
   }
   const i = f.icon as Partial<Record<string, unknown>> | undefined
-  if (i !== undefined && !(isString(i.name) && typeof i.x === 'number' && typeof i.y === 'number' && typeof i.zoom === 'number')) {
+  if (i !== undefined && !(isString(i.name) && isFiniteNumber(i.x) && isFiniteNumber(i.y) && isFiniteNumber(i.zoom))) {
     throw new Error('アイコンの形が正しくありません')
   }
   return f as CharacterFile

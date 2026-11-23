@@ -12,10 +12,14 @@
 // - POST /companion/request        … 画面からのモデル依頼。Claude Code の mod に渡し、答えを待つ
 // - GET  /companion/requests/next  … mod が依頼を取りに来る（来るまで少し待つ。無ければ 204）
 // - POST /companion/answer         … mod からの答え
+// - POST /companion/proactive/spoken … 画面が逆提案を話したという知らせ（提案の記録 logs/suggestions.jsonl に残す）
+// - POST /companion/pick-folder  … フォルダを選ぶ窓（OS のもの）を開き、選ばれた場所を返す（pick-folder.mjs）
+// - GET  /companion/proactive/materials … 逆提案の材料（会話の記録・過去の提案・今の時刻）を確かめる（開発用。proactive.mjs）
 // - GET  /companion/health         … 起動確認（合言葉不要）
 // - GET/POST /companion/engine     … 音声エンジンの起動の様子（mod・MCP が POST、画面が GET。入っていなければ missing）
 // - POST /companion/engine/restart … 音声エンジンの再起動を、エンジンを起動した mod（このサーバーの持ち主）に頼む
 // - /store/<agents|settings|messages|lines>[/<キー>] … 画面の保存データ（GET/PUT/DELETE、合言葉必須。store.mjs）
+// - 会話の記録：設定でオンのとき、発言と返事の合図を <data>/logs/conversation/ に日付ごとに残す（conversation-log.mjs）
 // - /files/vrm/<id>                … 読み込んだ VRM（GET/PUT/DELETE、合言葉必須）
 // - /tts/aivis/*                   … ローカル音声エンジン（AivisSpeech:10101）への中継（合言葉必須。声のモデルの出し入れ /aivm_models も通す）
 //
@@ -25,13 +29,16 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { createStore, isKey, isStoreName } from './store.mjs'
+import { createConversationLog } from './conversation-log.mjs'
+import { pickFolder } from './pick-folder.mjs'
+import { PROACTIVE_OP, collectMaterials, createSuggestionLog, gateOptions, gateReason, validateSuggestion } from './proactive.mjs'
 
 const APP = 'aicarnation'
 /**
  * サーバーの作りの版。動いているサーバーと版が違えば（同じ画面のフォルダでも）止めて入れ替わる。
- * 合図の扱いを変えたときに上げる（2：どのセッションの合図も画面に送る、3：mod が依頼を取りに来る）
+ * 合図の扱いを変えたときに上げる（2：どのセッションの合図も画面に送る、mod が依頼を取りに来る、3：会話を記録する、4：逆提案の材料を集める、5：逆提案の頻度と記録、6：Claude Code のセッション記録を材料に足す、7：フォルダを選ぶ窓、8：署名を返さない相手を止めない・記録の秘密を伏せる、9：逆提案の間隔と 1 日の回数を、既定では制限しない）
  */
-const SERVER_VERSION = 2
+const SERVER_VERSION = 9
 const MAX_BODY_BYTES = 64 * 1024
 const MAX_STORE_BYTES = 4 * 1024 * 1024
 const MAX_VRM_BYTES = 200 * 1024 * 1024
@@ -163,6 +170,61 @@ function parsePersona(v) {
 
 // --- 状態 ---
 const store = createStore(resolve(args.data))
+const conversationLog = createConversationLog(resolve(args.data))
+
+/** 画面の設定（settings ストアの { key, value }）を1つ読む */
+async function setting(key) {
+  const record = await store.get('settings', key).catch(() => undefined)
+  return record && typeof record === 'object' ? record.value : undefined
+}
+
+const suggestionLog = createSuggestionLog(resolve(args.data))
+/** 作ったが、まだ話していない逆提案：id → 提案（画面が話したと知らせてきたら記録する。次を作ったら捨てる） */
+let unspokenSuggestion = null
+
+/** 材料集めの設定：Claude Code のセッション記録は、設定でオンにしたときだけ読む（既定はオフ）。除外するフォルダは読まない */
+async function materialOptions() {
+  const exclude = await setting('proactiveSessionExclude')
+  return {
+    sessionsEnabled: (await setting('proactiveSessions')) === true,
+    sessionExcludeDirs: Array.isArray(exclude) ? exclude.filter((d) => typeof d === 'string' && d.trim()).slice(0, 50) : [],
+  }
+}
+
+/**
+ * 逆提案を作る。試し（dryRun）でなければ、出す頻度の決まり（間隔・1日の上限・出さない時間帯）を先に確かめ、
+ * だめならモデルを呼ばずに「提案なし」を返す。ask は、依頼を mod に渡して答えを待つ関数
+ */
+async function suggestProactive(dryRun, ask) {
+  if (!dryRun) {
+    const options = gateOptions(await setting('proactiveCooldownMin'), await setting('proactiveMaxPerDay'), await setting('proactiveQuietHours'))
+    const reason = gateReason(await suggestionLog.read(), options, new Date())
+    if (reason) return { result: { propose: false, reason, skipped: true } }
+  }
+  const answer = await ask({ persona, materials: await collectMaterials(resolve(args.data), await materialOptions()) })
+  if (answer.error) return answer
+  // 形がおかしい答えは「提案なし」にする
+  const suggestion = validateSuggestion(answer.result)
+  if (dryRun) return { result: suggestion }
+  unspokenSuggestion = null
+  if (!suggestion.propose) {
+    // 「提案なし」の判断も残す（傾向を見るため）
+    void suggestionLog.append(suggestion, false)
+    return { result: suggestion }
+  }
+  const id = randomBytes(8).toString('hex')
+  unspokenSuggestion = { id, suggestion }
+  return { result: { ...suggestion, id } }
+}
+
+/** 会話の合図を記録する（設定で記録がオンのときだけ。既定はオフ） */
+async function recordConversation(event) {
+  if (event.type !== 'listening' && event.type !== 'reply') return
+  // 逆提案を話したあとの発言なら、「反応があった」と残す
+  if (event.type === 'listening') void suggestionLog.userSpoke()
+  if ((await setting('conversationLog')) !== true) return
+  await conversationLog.append(event, await setting('conversationLogDays'))
+}
 const clients = new Set()
 let persona = null
 /** 画面からのモデル依頼の答え待ち：id → { resolve, timer } */
@@ -436,6 +498,7 @@ async function handle(req, res) {
       if (!event) return send(res, 400, { message: '合図の形が不正です' })
       // 共用しているどのセッション（Claude Code・Claude Desktop のチャット）の合図も、そのまま画面に送る
       broadcast(event)
+      void recordConversation(event)
       return send(res, 200, { delivered: clients.size })
     }
 
@@ -468,16 +531,41 @@ async function handle(req, res) {
     if (path === '/companion/request' && req.method === 'POST') {
       const body = await readJson(req).catch(() => null)
       if (typeof body?.op !== 'string') return send(res, 400, { message: '依頼の形が不正です' })
-      const id = String(nextId++)
-      const answer = await new Promise((resolveAnswer) => {
-        const timer = setTimeout(() => {
-          pending.delete(id)
-          resolveAnswer({ error: '時間内に答えが返りませんでした' })
-        }, REQUEST_TIMEOUT_MS)
-        pending.set(id, { resolve: resolveAnswer, timer })
-        dispatchRequest({ id, op: body.op, payload: body.payload ?? null })
-      })
+      const ask = (payload) =>
+        new Promise((resolveAnswer) => {
+          const id = String(nextId++)
+          const timer = setTimeout(() => {
+            pending.delete(id)
+            resolveAnswer({ error: '時間内に答えが返りませんでした' })
+          }, REQUEST_TIMEOUT_MS)
+          pending.set(id, { resolve: resolveAnswer, timer })
+          dispatchRequest({ id, op: body.op, payload })
+        })
+      // 逆提案：材料（会話の記録・過去の提案・今の時刻）と人柄は、画面からではなくここで集めて渡す
+      const answer = body.op === PROACTIVE_OP ? await suggestProactive(body.payload?.dryRun === true, ask) : await ask(body.payload ?? null)
       return answer.error ? send(res, 502, { message: answer.error }) : send(res, 200, answer.result)
+    }
+
+    // 画面が逆提案を話した：提案の記録に残す（話さずに捨てた提案は残さない）
+    if (path === '/companion/proactive/spoken' && req.method === 'POST') {
+      const body = await readJson(req).catch(() => null)
+      const held = unspokenSuggestion
+      if (!held || held.id !== body?.id) return send(res, 404, { message: '話す予定の提案がありません' })
+      unspokenSuggestion = null
+      await suggestionLog.append(held.suggestion, true)
+      return send(res, 204)
+    }
+
+    // フォルダを選ぶ窓を開き、選ばれたフォルダの場所を返す（画面からは場所が分からないため、同じ PC のサーバーが開く）
+    if (path === '/companion/pick-folder' && req.method === 'POST') {
+      const body = await readJson(req).catch(() => null)
+      const picked = await pickFolder(typeof body?.prompt === 'string' ? body.prompt : 'フォルダを選んでください')
+      return picked.error ? send(res, 409, { message: picked.error }) : send(res, 200, { path: picked.path })
+    }
+
+    // 逆提案の材料を確かめる（開発用。モデルは呼ばない）
+    if (path === '/companion/proactive/materials' && req.method === 'GET') {
+      return send(res, 200, { persona, materials: await collectMaterials(resolve(args.data), await materialOptions()) })
     }
 
     if (path === '/companion/requests/next' && req.method === 'GET') {
@@ -599,25 +687,17 @@ async function ourServer(port) {
 }
 
 /**
- * 古い aicarnation のサーバーを止める。署名で本物と確かめられれば、合言葉付きで止めてもらう。
- * 署名を返さない古い版（版 1）だけは、名乗ったプロセス番号で止める（入れ替えのため）
+ * 古い aicarnation のサーバーを止める。止めるのは、署名で本物と確かめられた相手だけで、合言葉付きで止めてもらう。
+ * 署名を返さない相手には何もしない：名乗ったプロセス番号を信じて止めると、ポートを先に取ったほかのプログラムが
+ * 番号を偽るだけで、利用者の好きなプロセスを止めさせられる（配ってきた版はどれも署名を返すので、番号で止める必要は無い）
  */
 async function stopServer(found) {
-  if (found.pid === process.pid) return
-  if (found.verified) {
-    await fetch(`http://127.0.0.1:${basePort}/companion/shutdown`, {
-      method: 'POST',
-      headers: { 'x-aicarnation-token': token },
-      signal: AbortSignal.timeout(1000),
-    }).catch(() => undefined)
-    return
-  }
-  if (found.version >= 2) return
-  try {
-    process.kill(found.pid)
-  } catch {
-    // もう止まっている
-  }
+  if (found.pid === process.pid || !found.verified) return
+  await fetch(`http://127.0.0.1:${basePort}/companion/shutdown`, {
+    method: 'POST',
+    headers: { 'x-aicarnation-token': token },
+    signal: AbortSignal.timeout(1000),
+  }).catch(() => undefined)
 }
 
 /** そのポートで動いている aicarnation のサーバーのプロセス番号。ほかのアプリや空きなら null */
@@ -659,6 +739,8 @@ function listen(retriesLeft) {
   })
   server.listen(basePort, '127.0.0.1', () => {
     emit({ kind: 'ready', port: basePort, token, url: `http://127.0.0.1:${basePort}/?token=${token}` })
+    // 起動したら、残す日数を過ぎた会話の記録を消す（記録がオフでも、前に残したものは消す）
+    void setting('conversationLogDays').then((days) => conversationLog.prune(days)).catch(() => undefined)
   })
 }
 

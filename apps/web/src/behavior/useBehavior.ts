@@ -11,6 +11,9 @@ import { DEFAULT_LINES, type LineBook, type Scene } from './lines'
 import type { MotionRole } from '../vrm/motion/clips'
 import type { IdleBody } from './director'
 import { DEFAULT_REACTION_TIMING, LineReactor, type ReactionTiming } from './reactions'
+import { ProactiveSuggester, proactiveTiming } from './proactive'
+import { reportProactiveSpoken, suggestProactive } from '../api/agents'
+import { IS_COMPANION } from '../runtime'
 
 /**
  * 試すとき用：URL の ?idle-speed=60 で待機・反応の時間を 60 倍速にする（1 分が 1 秒）。
@@ -48,6 +51,7 @@ function scaleReaction(timing: ReactionTiming, speed: number): ReactionTiming {
  * 会話していないときの過ごし方と、出来事への反応を動かす。
  * - 段階A：ひとりで過ごす（身ぶり・退屈・居眠り）。会話の出来事・アバターのクリックで目を覚ます
  * - 段階B：出来事（テストの結果・コマンドの失敗・長い作業・久しぶり・あいさつ）に台詞帳の一言で反応する
+ * - 段階C：放置が続いたら、最近の会話の記録から続きを提案する（逆提案。Claude Code のモデルが作る）
  */
 export function useBehavior(
   getViewer: () => VrmViewer | null,
@@ -68,8 +72,13 @@ export function useBehavior(
     () => [settings.idleGestures, settings.dozeEnabled] as const,
     () => director?.setTiming(idleTiming()),
   )
+  watch(
+    () => settings.proactiveAfterMin,
+    (min) => proactive?.setTiming(proactiveTiming(min, speed)),
+  )
   let director: BehaviorDirector | null = null
   let reactor: LineReactor | null = null
+  let proactive: ProactiveSuggester | null = null
   let book: LineBook = DEFAULT_LINES
   let offActivity: (() => void) | null = null
   let reactorTimer: number | undefined
@@ -152,11 +161,26 @@ export function useBehavior(
       },
     )
     director.start()
-    reactorTimer = window.setInterval(() => r.tick(), 1000)
+    // 段階C：放置が続いたら、最近の会話の記録からアバターが続きを提案する（同梱版。会話の記録と逆提案がオンのとき）
+    const p = (proactive = new ProactiveSuggester(
+      {
+        enabled: () => IS_COMPANION && settings.proactiveEnabled && settings.conversationLog && connection.value === 'connected',
+        busy: () => chat.conversing,
+        request: suggestProactive,
+        say: (raw) => chat.performReaction(raw),
+        spoken: reportProactiveSpoken,
+      },
+      proactiveTiming(settings.proactiveAfterMin, speed),
+    ))
+    reactorTimer = window.setInterval(() => {
+      r.tick()
+      p.tick()
+    }, 1000)
     offActivity = chat.onActivity((event) => {
       // 反応の台詞を話し終えるのは出来事ではないので、会話の合図と自分の発言だけを数える
       director?.activity('conversation')
       r.onEvent(event)
+      p.activity()
     })
     viewer.canvas.addEventListener('pointerdown', onTouch)
     greetIfReady()

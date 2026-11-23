@@ -190,8 +190,17 @@ export class VrmViewer {
     this.background.setPaused(paused)
   }
 
+  /** 読み込みを頼まれた順の番号。読み込み（解析）の間に、ほかの読み込み・取り外しが頼まれたら、古いほうは表示しない */
+  private loadSeq = 0
+
   async load(source: ArrayBuffer | string): Promise<LoadedVrmInfo> {
+    const seq = ++this.loadSeq
     const vrm = await loadVrm(source)
+    if (seq !== this.loadSeq) {
+      // 大きいモデルは解析に時間がかかる。あとから頼まれたモデルを、遅れて上書きしないようにする
+      disposeVrm(vrm)
+      throw new Error('ほかのモデルの読み込みに置き換わりました')
+    }
     this.setVrm(vrm)
     const meta = vrm.meta
     const title = meta.metaVersion === '0' ? meta.title : meta.name
@@ -200,6 +209,7 @@ export class VrmViewer {
 
   /** 表示中のモデルを外す（キャラクターにモデルがまだ入っていないとき） */
   clear(): void {
+    this.loadSeq++
     if (!this.vrm) return
     this.scene.remove(this.vrm.scene)
     disposeVrm(this.vrm)

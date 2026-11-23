@@ -48,6 +48,43 @@ describe('キャラクターの書き出しファイル', () => {
     expect(() => parseCharacterFile({ ...file, motions: [{ role: 'idle' }] })).toThrow('動きの割り当て')
   })
 
+  it('声の数値は、画面で選べる範囲の数だけを受け付ける', () => {
+    const file = makeCharacterFile(agent, { vrmFileName: null, engineStyle: null, dictionary: [] })
+    const withVoice = (voice: Record<string, unknown>) => ({ ...file, voice: { ...file.voice, ...voice } })
+    for (const voice of [
+      { rate: 0 },
+      { rate: 100 },
+      { rate: Number.NaN },
+      { rate: Number.POSITIVE_INFINITY },
+      { rate: '1' },
+      { pitch: -1 },
+      { pitch: 2.5 },
+      { intonation: 'x' },
+      { intonation: 9 },
+      { tempo: -0.1 },
+      { emotional: 'yes' },
+      { speaker: 1 },
+    ]) {
+      expect(() => parseCharacterFile(withVoice(voice)), JSON.stringify(voice)).toThrow('声の設定')
+    }
+    // 範囲の端と、省いた項目は通る
+    expect(() => parseCharacterFile(withVoice({ rate: 0.5, pitch: 0, intonation: 2, tempo: 0, emotional: false }))).not.toThrow()
+    expect(() => parseCharacterFile(withVoice({ rate: 2, pitch: 2, intonation: undefined, tempo: undefined, emotional: undefined }))).not.toThrow()
+  })
+
+  it('背景の色は色の番号だけを受け付ける（url(…) などは断る）', () => {
+    const file = makeCharacterFile(agent, { vrmFileName: null, engineStyle: null, dictionary: [] })
+    const withColor = (color: unknown) => ({ ...file, backdrop: { kind: 'color', color } })
+    for (const color of ['url(https://example.com/t.gif)', 'red', '#12', '#gggggg', '#ffffff; background: url(x)', '', 1]) {
+      expect(() => parseCharacterFile(withColor(color)), String(color)).toThrow('背景の形')
+    }
+    for (const color of ['#fff', '#f6efe6', '#2B2F3A', '#11223344']) {
+      expect(() => parseCharacterFile(withColor(color)), color).not.toThrow()
+    }
+    // アイコンの数値も、数でない値・無限大は断る
+    expect(() => parseCharacterFile({ ...file, icon: { name: 'a.png', x: 0, y: Number.NaN, zoom: 1 } })).toThrow('アイコンの形')
+  })
+
   it('声は、同じ話者・スタイルが入っていればそれを使い、無ければブラウザの声にして要る声を返す', () => {
     const file = makeCharacterFile(agent, { vrmFileName: null, engineStyle: styles[0]!, dictionary: [] })
     const found = resolveVoice(file.voice, [{ styleId: 999, speaker: 'テスト役', style: 'ノーマル' }])
