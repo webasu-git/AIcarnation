@@ -67,6 +67,36 @@ async function take(env: Env, key: string, limit: number): Promise<number | null
   return row?.count ?? null
 }
 
+/**
+ * 数を 1 つ戻す（利用者ごとの数を取ったあと、全体の上限で断ったとき。モデルは呼んでいないので、利用者の回数は減らさない）
+ */
+async function giveBack(env: Env, key: string): Promise<void> {
+  await env.DB.prepare('UPDATE usage_counters SET count = count - 1 WHERE key = ?1 AND count > 0')
+    .bind(key)
+    .run()
+    .catch(() => undefined)
+}
+
+/**
+ * 利用者ごとの数を取ってから、全体の数を取る。全体で断られた・数えられなかったときは、利用者の数を戻す
+ */
+async function takeWithGlobal(env: Env, userKey: string, userLimit: number): Promise<number | null> {
+  const used = await take(env, userKey, userLimit)
+  if (used === null) return null
+  let global: number | null
+  try {
+    global = await take(env, globalKey(), globalLimit(env))
+  } catch (err) {
+    await giveBack(env, userKey)
+    throw err
+  }
+  if (global === null) {
+    await giveBack(env, userKey)
+    return null
+  }
+  return used
+}
+
 /** 前の日までの数を消す（失敗しても、数えるほうには影響させない） */
 async function cleanupOldCounters(env: Env): Promise<void> {
   if (Math.random() >= CLEANUP_CHANCE) return
@@ -84,9 +114,8 @@ async function cleanupOldCounters(env: Env): Promise<void> {
  */
 export async function reserveUsage(env: Env, anonId: string): Promise<UsageResponse | null> {
   const limit = dailyLimit(env)
-  const used = await take(env, usageKey(anonId), limit)
+  const used = await takeWithGlobal(env, usageKey(anonId), limit)
   if (used === null) return null
-  if ((await take(env, globalKey(), globalLimit(env))) === null) return null
   await cleanupOldCounters(env)
   return { used, limit, resetsAt: nextResetJst() }
 }
@@ -96,6 +125,5 @@ export async function reserveUsage(env: Env, anonId: string): Promise<UsageRespo
  * 全体の上限にも数える：利用者ごとの数だけだと、匿名 ID を作り直すたびに枠が増え、全体の上限の外でモデルを呼べてしまう
  */
 export async function reserveVoiceSuggestion(env: Env, anonId: string): Promise<boolean> {
-  if ((await take(env, `voice:${anonId}:${todayJst()}`, DAILY_VOICE_SUGGEST_LIMIT)) === null) return false
-  return (await take(env, globalKey(), globalLimit(env))) !== null
+  return (await takeWithGlobal(env, `voice:${anonId}:${todayJst()}`, DAILY_VOICE_SUGGEST_LIMIT)) !== null
 }

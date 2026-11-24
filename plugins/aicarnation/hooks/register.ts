@@ -104,9 +104,35 @@ let serverError: string | null = null
 let serverRunning = false
 /** ほかのセッション（Claude Desktop も含む）が起動したサーバーを共用しているか */
 let sharedServer = false
+/**
+ * このセッションが起動したサーバーの場所（起動したと知らせてきたもの）。通信が一度途切れてつなぎ先を忘れても、
+ * そのサーバーのプロセスが動いている間は、ほかのプログラムがポートを取ることはないので、ここへつなぎ直してよい
+ */
+let ownUrl: string | null = null
+/**
+ * このセッションのサーバーが、ほかのセッションのサーバーに入れ替えられた。以後は、動いているサーバーを止めずに共用する
+ * （止め返すと、版の違うセッションどうしが互いのサーバーを止め合う）
+ */
+let shareOnly = false
 
-function pageUrl(): string | null {
-  return baseUrl ? `${baseUrl}/?token=${token}` : null
+/**
+ * 画面を開く URL。合言葉の代わりに、サーバーが出す使い捨ての券（2 分・1 回だけ）を入れる
+ * （合言葉そのものを URL に入れると、このセッションの記録やブラウザの履歴に残るため）。
+ * 券を出せない古いサーバー（404）のときだけ、合言葉を入れる
+ */
+async function pageUrl($: EngineInterface): Promise<string | null> {
+  if (!baseUrl) return null
+  try {
+    const res = await $.http.fetch(`${baseUrl}/companion/ticket`, { method: 'POST', headers: authHeaders() })
+    if (res.ok) {
+      const body = JSON.parse(res.text) as { ticket?: unknown }
+      if (typeof body.ticket === 'string' && /^[0-9a-f]{32}$/.test(body.ticket)) return `${baseUrl}/?ticket=${body.ticket}`
+    }
+    if (res.status === 404) return `${baseUrl}/?token=${token}`
+  } catch {
+    // 券を出してもらえなかった
+  }
+  return null
 }
 
 function authHeaders(): Record<string, string> {
@@ -126,7 +152,17 @@ async function nodeCommand($: EngineInterface): Promise<string> {
     const programFiles = (await $.env.get('ProgramFiles')) ?? 'C:\\Program Files'
     const official = `${programFiles}\\nodejs\\node.exe`
     if (await $.fs.exists(official).catch(() => false)) return official
-    return 'node'
+    // 次に、PATH のフォルダ（絶対パスのものだけ）から自分で探して、場所を名指しする（nvm・Volta・scoop などで入れた場合）。
+    // 名前だけで渡すと、いまのフォルダの node.exe が先に見つかることがあるので、名前だけでは渡さない
+    const path = (await $.env.get('PATH')) ?? (await $.env.get('Path')) ?? ''
+    for (const dir of path.split(';')) {
+      const folder = dir.trim().replace(/^"|"$/g, '').replace(/[\\/]+$/, '')
+      if (!/^[A-Za-z]:[\\/]/.test(folder)) continue
+      const candidate = `${folder}\\node.exe`
+      if (await $.fs.exists(candidate).catch(() => false)) return candidate
+    }
+    // 見つからない：公式の場所を名指しする（起動に失敗して「Node が見つからない」と伝わる）
+    return official
   }
   for (const path of ['/opt/homebrew/bin/node', '/usr/local/bin/node']) {
     if (await $.fs.exists(path).catch(() => false)) return path
@@ -141,9 +177,29 @@ async function runServer($: EngineInterface): Promise<void> {
   sharedServer = false
   serverError = null
   const root = $.plugin.root
-  const child = $.process.spawn({
-    argv: [await nodeCommand($), `${root}/server/aicarnation-server.mjs`, '--web', `${root}/web`, '--data', dataDir($), '--token-file', tokenFile($), '--port', String(DEFAULT_PORT)],
+  let child: ReturnType<typeof $.process.spawn>
+  try {
+    child = $.process.spawn({
+    argv: [
+      await nodeCommand($),
+      `${root}/server/aicarnation-server.mjs`,
+      '--web',
+      `${root}/web`,
+      '--data',
+      dataDir($),
+      '--token-file',
+      tokenFile($),
+      '--port',
+      String(DEFAULT_PORT),
+      ...(shareOnly ? ['--share-only', '1'] : []),
+    ],
   })
+  } catch {
+    // 起動できなかった（Node が見つからないなど）：印を外して、次の合図でもう一度試せるようにする
+    serverRunning = false
+    $.ui.status('アバター：サーバーを起動できません（Node 18 以上が必要です）')
+    return
+  }
   let buffer = ''
   try {
     for await (const piece of child) {
@@ -160,12 +216,14 @@ async function runServer($: EngineInterface): Promise<void> {
       serverRunning = false
       return
     }
-    $.ui.status(serverError ?? 'アバター：サーバーが止まりました')
+    // ほかのセッションのサーバーに入れ替えられたときは、止まったのではなく、次の合図からそちらを共用する
+    $.ui.status(serverError ?? (shareOnly ? 'アバター：ほかのセッションのサーバーを使います' : 'アバター：サーバーが止まりました'))
   } catch {
     $.ui.status('アバター：サーバーを起動できません（Node 18 以上が必要です）')
   }
   serverRunning = false
   baseUrl = null
+  ownUrl = null
   listeners = 0
 }
 
@@ -188,6 +246,12 @@ async function serverAnswers($: EngineInterface): Promise<boolean> {
  */
 async function ensureServer($: EngineInterface, waitMs = 8000): Promise<boolean> {
   if (await serverAnswers($)) return true
+  // このセッションが起動したサーバーがまだ動いていれば、そこへつなぎ直す（通信が一度途切れただけのとき）。
+  // サーバーを起動し直そうとしても、動いている間は起動しない作りなので、ここで戻さないと、つなぎ先が無いまま止まってしまう
+  if (serverRunning && ownUrl) {
+    baseUrl = ownUrl
+    if (await serverAnswers($)) return true
+  }
   baseUrl = null
   if (!storageRoot) storageRoot = await resolveStorageRoot($)
   void runServer($)
@@ -207,7 +271,12 @@ async function onServerMessage($: EngineInterface, line: string): Promise<void> 
     baseUrl = `http://127.0.0.1:${message.port}`
     token = message.token ?? ''
     sharedServer = message.kind === 'shared'
+    ownUrl = sharedServer ? null : baseUrl
     $.ui.status('アバター：/aicarnation で開けます')
+    return
+  }
+  if (message.kind === 'replaced') {
+    shareOnly = true
     return
   }
   if (message.kind === 'error') {
@@ -330,34 +399,47 @@ async function reportEngine($: EngineInterface, engine: EngineId, state: 'starti
 
 async function startEngine($: EngineInterface, engine: EngineId): Promise<void> {
   if (startedEngines.has(engine)) return
+  // 探す前に印を付ける（探している間に、もう一度起動を頼まれても二重に起動しないように）
+  startedEngines.add(engine)
   const path = await findEngine($, engine)
   if (!path) {
+    startedEngines.delete(engine)
     await reportEngine($, engine, 'missing')
     $.ui.toast(`${ENGINE_LABELS[engine]}が見つかりません。/aicarnation-voice install ${engine} で入れるか、起動しておいてください`)
     return
   }
-  startedEngines.add(engine)
   await reportEngine($, engine, 'starting')
   $.ui.toast(`${ENGINE_LABELS[engine]}を起動しています…（数十秒かかることがあります）`)
-  const child = $.process.spawn({ argv: [path, '--host', '127.0.0.1', '--port', String(ENGINE_PORTS[engine])] })
+  let child: ReturnType<typeof $.process.spawn>
+  try {
+    child = $.process.spawn({ argv: [path, '--host', '127.0.0.1', '--port', String(ENGINE_PORTS[engine])] })
+  } catch {
+    // 起動できなかった：印を外して、もう一度起動できるようにする
+    startedEngines.delete(engine)
+    await reportEngine($, engine, 'stopped')
+    $.ui.toast(`${ENGINE_LABELS[engine]}を起動できませんでした`)
+    return
+  }
   let finish = () => {}
   const done = new Promise<void>((resolve) => (finish = resolve))
   let stopping = false
-  engineRuns.set(engine, {
+  const run = {
     stop: () => {
       stopping = true
       // ループの外から子プロセスを止める（spawn の流れを閉じると子プロセスが終わる）
       void child.return(undefined as never).catch(() => undefined)
     },
     done,
-  })
+  }
+  engineRuns.set(engine, run)
   try {
     // 出力は使わないが、読み続けないと止まってしまうので読み捨てる
     for await (const piece of child) void piece
   } catch {
     if (!stopping) $.ui.toast(`${ENGINE_LABELS[engine]}を起動できませんでした`)
   }
-  engineRuns.delete(engine)
+  // 消すのは自分の記録だけ（あとから起動したほうの記録を消さないように）
+  if (engineRuns.get(engine) === run) engineRuns.delete(engine)
   startedEngines.delete(engine)
   await reportEngine($, engine, 'stopped')
   finish()
@@ -520,17 +602,23 @@ let pollingRequests = false
 async function pollRequests($: EngineInterface): Promise<void> {
   if (pollingRequests) return
   pollingRequests = true
-  /** つなぎ先を失ってから待った回数（5 秒ごと） */
+  /** つなぎ先を失ってから待った回数（5 秒ごと）と、次に起動の手順をやり直すまでの回数 */
   let waits = 0
+  let retryEvery = RETRY_FIRST
   for (;;) {
     if (!baseUrl) {
       await $.clock.sleep(5000)
-      // つなぎ先を失ったら、30 秒ごとに起動の手順からやり直す。起動の手順は、相手が本物のサーバーか（合言葉で署名を返すか）を
-      // 確かめてから共用する。確かめられるまで、合言葉も発言も送らない
-      if (++waits % 6 === 0) await ensureServer($, 8000)
+      // つなぎ先を失ったら、起動の手順からやり直す。起動の手順は、相手が本物のサーバーか（合言葉で署名を返すか）を
+      // 確かめてから共用する。確かめられるまで、合言葉も発言も送らない。
+      // 起動できないとき（ポートをほかのアプリが使っているなど）は、間隔を倍にしていく（30 秒 → … → 10 分）
+      if (++waits >= retryEvery) {
+        waits = 0
+        retryEvery = (await ensureServer($, 8000)) ? RETRY_FIRST : Math.min(retryEvery * 2, RETRY_MAX)
+      }
       continue
     }
     waits = 0
+    retryEvery = RETRY_FIRST
     try {
       // 扱える依頼を名乗る（Claude Code を複数開いていて版が混ざっていても、サーバーは扱える mod にだけ渡す）
       const res = await $.http.fetch(`${baseUrl}/companion/requests/next?ops=${REQUEST_OPS.join(',')}`, { headers: authHeaders() })
@@ -548,6 +636,10 @@ async function pollRequests($: EngineInterface): Promise<void> {
     }
   }
 }
+
+/** つなぎ先を失ったあと、起動の手順をやり直すまでの回数（5 秒ごとに数える。最初は 30 秒、最長 10 分） */
+const RETRY_FIRST = 6
+const RETRY_MAX = 120
 
 /** この mod が答えられる依頼（answerRequest と合わせる） */
 const REQUEST_OPS = ['generate-agent', 'suggest-voice', 'generate-lines', 'suggest-proactive'] as const
@@ -842,13 +934,14 @@ export const register: Register = (on) => {
   })
 
   on('command.run', { command: 'aicarnation' }, async ($) => {
-    const url = (await ensureServer($)) ? pageUrl() : null
+    const url = (await ensureServer($)) ? await pageUrl($) : null
     if (!url) return { text: serverError ?? 'アバターのサーバーを起動できませんでした。少し待ってからもう一度試すか、Node 18 以上が入っているか確かめてください。' }
     const opened = await openInBrowser($, url)
     return {
       text: opened
-        ? `アバターをブラウザで開きました。Chrome / Edge なら「小窓で開く」で常に手前に置けます。\n${url}`
-        : `次の URL をブラウザで開いてください（Chrome / Edge 推奨）：\n${url}`,
+        ? // 開いた URL の券はもう使ったので、返事には出さない（もう一度開くときは /aicarnation を実行する）
+          'アバターをブラウザで開きました。Chrome / Edge なら「小窓で開く」で常に手前に置けます。'
+        : `次の URL をブラウザで開いてください（Chrome / Edge 推奨。2 分以内に 1 回だけ使えます。使えなくなったら /aicarnation をもう一度実行してください）：\n${url}`,
     }
   })
 

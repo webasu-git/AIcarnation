@@ -128,6 +128,13 @@ export async function collectMaterials(dataDir, options = {}, now = new Date()) 
   }
 }
 
+/**
+ * 話す文に入れてはいけないもの：URL・ドメイン、ファイルの場所（C:\… や /…/…）、コードの印（`）、
+ * コマンドらしき書き方（よく使うコマンド名に続く引数、パイプ、リダイレクト）
+ */
+const UNSAFE_SPEECH =
+  /https?:|www\.|[a-z0-9-]+\.(com|net|org|io|dev|jp|co|app|sh|ru|cn|xyz)\b|[A-Za-z]:[\\/]|(^|[\s(（「])[~.]?\/[\w.-]+\/|`|\b(sudo|rm|curl|wget|powershell|pwsh|cmd|bash|npm|npx|pnpm|pip|git|chmod|del|iex)\s+[-\w./]|\|\s*\w|&&|>\s*\S/i
+
 /** 感情タグ・改行を除いて、話す文だけにする */
 function cleanSpeech(text) {
   return String(text)
@@ -149,6 +156,9 @@ export function validateSuggestion(raw) {
   const text = cleanSpeech(raw.text)
   if (!text) return none('提案の文が空です')
   if (text.length > MAX_SUGGESTION_CHARS) return none(`提案の文が長すぎます（${text.length} 文字）`)
+  // 材料（セッション記録）の中の文に誘導されて、URL・ファイルの場所・コマンドを勧めることがないよう、入っていたら出さない
+  // （アバターは話すだけだが、利用者がそのまま開いたり実行したりしないように。プロンプトでも頼んでいる）
+  if (UNSAFE_SPEECH.test(text)) return none('提案の文に URL・ファイルの場所・コマンドが入っています')
   if (!EMOTIONS.includes(raw.emotion)) return none('感情が不正です')
   return { propose: true, emotion: raw.emotion, text, reason }
 }

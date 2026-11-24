@@ -265,6 +265,11 @@ async function askSuggestion() {
   if (options.length === 0 || suggesting.value) return
   suggesting.value = true
   suggestReason.value = ''
+  // 頼んだときの声の出し方と選んでいた声。答えが届くまでに、利用者が出し方を切り替えたり声を選んだりしていたら、
+  // その選択を答えで上書きしない
+  const askedSource = voiceSource.value
+  const askedVoice = voice.voiceURI
+  const stillWanted = () => voiceSource.value === askedSource && voice.voiceURI === askedVoice
   try {
     const result = await suggestVoice({
       agent: {
@@ -276,14 +281,22 @@ async function askSuggestion() {
       },
       voices: options,
     })
+    if (!stillWanted()) return
     voice.voiceURI = result.voiceURI || (options[0]?.voiceURI ?? '')
     suggestReason.value = result.reason
   } catch (err) {
+    if (!stillWanted()) return
     // おすすめが無くても選べるよう、先頭の声にしておく
     if (voiceSource.value !== 'browser') voice.voiceURI = options[0]?.voiceURI ?? ''
     suggestReason.value = err instanceof ApiError ? `おすすめを取得できませんでした：${err.message}` : 'おすすめを取得できませんでした'
   } finally {
     suggesting.value = false
+    // 待っている間に出し方を切り替えていて、その出し方の声がまだ選ばれていなければ、改めておすすめを聞く
+    // （切り替えたときのおすすめは、この問い合わせの最中だったので聞けていない）
+    const source = voiceSource.value
+    if (source !== askedSource && source !== 'browser' && engineState.value === 'ready' && parseEngineVoiceURI(voice.voiceURI)?.engine !== source) {
+      void askSuggestion()
+    }
   }
 }
 

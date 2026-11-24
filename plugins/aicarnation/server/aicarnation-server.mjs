@@ -16,6 +16,8 @@
 // - POST /companion/pick-folder  … フォルダを選ぶ窓（OS のもの）を開き、選ばれた場所を返す（pick-folder.mjs）
 // - GET  /companion/proactive/materials … 逆提案の材料（会話の記録・過去の提案・今の時刻）を確かめる（開発用。proactive.mjs）
 // - GET  /companion/health         … 起動確認（合言葉不要）
+// - POST /companion/ticket         … 画面を開く URL に入れる使い捨ての券を出す（合言葉必須）
+// - POST /companion/redeem         … 画面が券を合言葉と引き換える（券は 1 回・2 分だけ）
 // - GET/POST /companion/engine     … 音声エンジンの起動の様子（mod・MCP が POST、画面が GET。入っていなければ missing）
 // - POST /companion/engine/restart … 音声エンジンの再起動を、エンジンを起動した mod（このサーバーの持ち主）に頼む
 // - /store/<agents|settings|messages|lines>[/<キー>] … 画面の保存データ（GET/PUT/DELETE、合言葉必須。store.mjs）
@@ -32,13 +34,15 @@ import { createStore, isKey, isStoreName } from './store.mjs'
 import { createConversationLog } from './conversation-log.mjs'
 import { pickFolder } from './pick-folder.mjs'
 import { PROACTIVE_OP, collectMaterials, createSuggestionLog, gateOptions, gateReason, validateSuggestion } from './proactive.mjs'
+import { ttsAllowed } from './tts-allow.mjs'
+import { createTickets } from './tickets.mjs'
 
 const APP = 'aicarnation'
 /**
  * サーバーの作りの版。動いているサーバーと版が違えば（同じ画面のフォルダでも）止めて入れ替わる。
- * 合図の扱いを変えたときに上げる（2：どのセッションの合図も画面に送る、mod が依頼を取りに来る、3：会話を記録する、4：逆提案の材料を集める、5：逆提案の頻度と記録、6：Claude Code のセッション記録を材料に足す、7：フォルダを選ぶ窓、8：署名を返さない相手を止めない・記録の秘密を伏せる、9：逆提案の間隔と 1 日の回数を、既定では制限しない）
+ * 合図の扱いを変えたときに上げる（2：どのセッションの合図も画面に送る、mod が依頼を取りに来る、3：会話を記録する、4：逆提案の材料を集める、5：逆提案の頻度と記録、6：Claude Code のセッション記録を材料に足す、7：フォルダを選ぶ窓、8：署名を返さない相手を止めない・記録の秘密を伏せる、9：逆提案の間隔と 1 日の回数を、既定では制限しない、10：保存の失敗を返し、読めないときに空で上書きしない、11：起動確認で画面のフォルダを署名で返す・音声の中継を画面が使う呼び出しだけにする・合言葉の代わりに使い捨ての券で画面を開く）
  */
-const SERVER_VERSION = 9
+const SERVER_VERSION = 11
 const MAX_BODY_BYTES = 64 * 1024
 const MAX_STORE_BYTES = 4 * 1024 * 1024
 const MAX_VRM_BYTES = 200 * 1024 * 1024
@@ -65,8 +69,14 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2))
+/** 動いているサーバーがあれば、版が違っても止めずに共用する（入れ替えられたセッションが起動し直すとき） */
+const shareOnly = args['share-only'] === '1'
 const webRoot = resolve(args.web ?? '')
 const token = args.token ?? (args['token-file'] ? await loadToken(args['token-file']) : '')
+/** 画面を開く URL に入れる使い捨ての券 */
+const tickets = createTickets()
+/** 画面のフォルダを合言葉で署名した値（起動確認で返す。同じ合言葉のサーバー同士だけが、同じフォルダかを比べられる） */
+const webSignature = createHmac('sha256', token).update(`aicarnation-web:${webRoot}`).digest('hex')
 const basePort = Number(args.port ?? 48280)
 if (!args.web || !args.data || token.length < 16) {
   console.error('usage: aicarnation-server.mjs --web <dir> --data <dir> (--token <token(16+ chars)> | --token-file <path>) [--port n]')
@@ -172,10 +182,23 @@ function parsePersona(v) {
 const store = createStore(resolve(args.data))
 const conversationLog = createConversationLog(resolve(args.data))
 
-/** 画面の設定（settings ストアの { key, value }）を1つ読む */
+/** 画面の設定（settings ストアの { key, value }）を1つ読む。読めなければ undefined */
 async function setting(key) {
   const record = await store.get('settings', key).catch(() => undefined)
   return record && typeof record === 'object' ? record.value : undefined
+}
+
+/**
+ * 会話の記録を残す日数の設定。保存されていなければ undefined（既定の日数になる）、読めなければ null（古い記録を消さない）。
+ * 一時的に読めなかっただけで既定の日数で消すと、長く残す設定にしている記録を失う
+ */
+async function logDaysSetting() {
+  try {
+    const record = await store.get('settings', 'conversationLogDays')
+    return record && typeof record === 'object' ? record.value : undefined
+  } catch {
+    return null
+  }
 }
 
 const suggestionLog = createSuggestionLog(resolve(args.data))
@@ -223,7 +246,7 @@ async function recordConversation(event) {
   // 逆提案を話したあとの発言なら、「反応があった」と残す
   if (event.type === 'listening') void suggestionLog.userSpoke()
   if ((await setting('conversationLog')) !== true) return
-  await conversationLog.append(event, await setting('conversationLogDays'))
+  await conversationLog.append(event, await logDaysSetting())
 }
 const clients = new Set()
 let persona = null
@@ -297,6 +320,11 @@ function dispatchRequest(request) {
   fallback()
 }
 
+/** Claude Code の今の様子（考え中・作業中の表示）。終わりの合図（待機・返事）で消す */
+let lastStatus = null
+/** 覚えている様子を、つなぎ直した画面に伝える期間（それより古ければ、セッションが途中で閉じたとみなす） */
+const STATUS_FRESH_MS = 15 * 60_000
+
 function broadcast(event) {
   const data = `event: bridge\ndata: ${JSON.stringify(event)}\n\n`
   for (const res of clients) res.write(data)
@@ -353,6 +381,8 @@ function proxyTts(req, res, engine, rest) {
     }
     send(res, 502, { message: `${engine} が起動していません` })
   })
+  // エンジンが固まったら、時間で切る（画面の待ちが終わらないままにならないように。声のモデルの導入は大きいので長めに）
+  upstream.setTimeout(rest.startsWith('/aivm_models/install') ? 600_000 : 120_000, () => upstream.destroy(new Error('timeout')))
   // 画面側が先に接続を切ったら、エンジンへの問い合わせもやめる
   res.on('close', () => upstream.destroy())
   req.pipe(upstream)
@@ -440,13 +470,32 @@ async function handle(req, res) {
   if (path === '/companion/health') {
     const nonce = url.searchParams.get('nonce')
     const proof = nonce && /^[0-9a-f]{16,64}$/.test(nonce) ? healthProof(token, nonce) : undefined
-    return send(res, 200, { app: APP, pid: process.pid, web: webRoot, version: SERVER_VERSION, proof })
+    // 画面のフォルダは、パスではなく合言葉で署名した値で返す（手元のパスに入る利用者名を、合言葉を知らない相手に見せない）
+    return send(res, 200, { app: APP, pid: process.pid, web: webSignature, version: SERVER_VERSION, proof })
+  }
+
+  // 画面を開く URL に入れる使い捨ての券を出す（mod・MCP が呼ぶ。合言葉が要る）
+  if (path === '/companion/ticket' && req.method === 'POST') {
+    if (!hasToken(req, url)) return send(res, 401, { message: '合言葉が違います' })
+    return send(res, 200, { ticket: tickets.issue() })
+  }
+
+  // 画面が、URL の券を合言葉と引き換える（券は 1 回・2 分だけ使える。合言葉は URL にも記録にも出ない）
+  if (path === '/companion/redeem' && req.method === 'POST') {
+    // 引き換えるのは、このサーバーが配った画面だけ（ほかのサイトのページからは断る）
+    const origin = req.headers.origin
+    if (origin && origin !== `http://${req.headers.host}`) return send(res, 403, { message: 'この画面からは使えません' })
+    const body = await readJson(req, 1024).catch(() => null)
+    if (!tickets.redeem(body?.ticket)) return send(res, 404, { message: 'この URL は使えなくなりました。/aicarnation で開き直してください' })
+    return send(res, 200, { token })
   }
 
   // 本物のサーバーだと確かめられた相手（合言葉を知っている）からの、止めてほしいという依頼（新しい版に入れ替えるとき）
   if (path === '/companion/shutdown' && req.method === 'POST') {
     if (!hasToken(req, url)) return send(res, 401, { message: '合言葉が違います' })
     send(res, 204)
+    // 入れ替えられたことを、起動した mod・MCP に知らせる（以後は止め返さずに共用する）
+    emit({ kind: 'replaced' })
     setTimeout(() => process.exit(0), 50)
     return
   }
@@ -454,6 +503,7 @@ async function handle(req, res) {
   const tts = path.match(/^\/tts\/(aivis)(\/.*)?$/)
   if (tts) {
     if (!hasToken(req, url)) return send(res, 401, { message: '合言葉が違います' })
+    if (!ttsAllowed(req.method ?? 'GET', tts[2] ?? '/')) return send(res, 403, { message: 'この呼び出しは中継しません' })
     url.searchParams.delete('token')
     const query = url.searchParams.toString()
     return proxyTts(req, res, tts[1], `${tts[2] ?? '/'}${query ? `?${query}` : ''}`)
@@ -481,6 +531,10 @@ async function handle(req, res) {
         Connection: 'keep-alive',
       })
       res.write(': connected\n\n')
+      // つなぎ直した画面に、今の様子（考え中・作業中）を伝える。切れている間に届いた合図は、画面には届いていないため
+      if (lastStatus && Date.now() - lastStatus.at < STATUS_FRESH_MS) {
+        res.write(`event: status\ndata: ${JSON.stringify({ label: lastStatus.label })}\n\n`)
+      }
       clients.add(res)
       announceSpeaker()
       const timer = setInterval(() => res.write(': keep-alive\n\n'), KEEP_ALIVE_MS)
@@ -496,6 +550,10 @@ async function handle(req, res) {
       if (req.headers['x-aicarnation-bridge'] !== '1') return send(res, 403, { message: 'x-aicarnation-bridge ヘッダーが必要です' })
       const event = parseBridgeEvent(await readJson(req).catch(() => null))
       if (!event) return send(res, 400, { message: '合図の形が不正です' })
+      // 今の様子を覚えておく（つなぎ直した画面に伝えるため）
+      if (event.type === 'listening') lastStatus = { label: '考え中', at: Date.now() }
+      else if (event.type === 'working') lastStatus = { label: event.label, at: Date.now() }
+      else if (event.type === 'idle' || event.type === 'reply') lastStatus = null
       // 共用しているどのセッション（Claude Code・Claude Desktop のチャット）の合図も、そのまま画面に送る
       broadcast(event)
       void recordConversation(event)
@@ -725,22 +783,30 @@ function listen(retriesLeft) {
   server.once('error', async (err) => {
     if (err.code !== 'EADDRINUSE') {
       emit({ kind: 'error', message: err.message })
-      process.exit(1)
+      // 知らせを書き終えてから終わる（すぐ終えると、パイプに書き切れないことがある）
+      setTimeout(() => process.exit(1), 100)
+      return
     }
-    // 古い aicarnation が残っていれば止めて取り直す。止めたあとポートが空くまで少し待つ
+    // 古い aicarnation が残っていれば止めて取り直す。止めたあとポートが空くまで少し待つ。
+    // 共用だけのセッション（--share-only）は止めない：動いているサーバーが答えれば共用し、答えなければ空くのを待つ
     const found = await ourServer(basePort)
-    if (found) await stopServer(found)
+    if (found && shareOnly && found.verified) {
+      emit({ kind: 'shared', port: basePort, token, url: `http://127.0.0.1:${basePort}/?token=${token}` })
+      setTimeout(() => process.exit(0), 100)
+      return
+    }
+    if (found && !shareOnly) await stopServer(found)
     if (retriesLeft > 0 && (found !== null || (await portNotAnswering()))) {
       setTimeout(() => listen(retriesLeft - 1), LISTEN_WAIT_MS)
       return
     }
     emit({ kind: 'error', message: `ポート ${basePort} を別のアプリが使っています` })
-    process.exit(1)
+    setTimeout(() => process.exit(1), 100)
   })
   server.listen(basePort, '127.0.0.1', () => {
     emit({ kind: 'ready', port: basePort, token, url: `http://127.0.0.1:${basePort}/?token=${token}` })
     // 起動したら、残す日数を過ぎた会話の記録を消す（記録がオフでも、前に残したものは消す）
-    void setting('conversationLogDays').then((days) => conversationLog.prune(days)).catch(() => undefined)
+    void logDaysSetting().then((days) => conversationLog.prune(days)).catch(() => undefined)
   })
 }
 
@@ -750,15 +816,17 @@ async function portNotAnswering() {
 }
 
 // 同じ版のサーバーがもう動いていれば（ほかのセッションや Claude Desktop が起動したもの）、それを共用する。
-// 止めて入れ替えると、起動したセッションが終わったときにサーバーが無くなってしまうため。
-// 古い版（画面のフォルダか、サーバーの作りの版が違う）のサーバーだけ止める
+// 版（画面のフォルダか作りの版）が違えば止めて入れ替える（あとから起動したセッションの版を使う：プラグインを切り替えたとき）。
+// ただし、一度入れ替えられたセッションは --share-only 1 で起動し直し、動いているサーバーを止めない
+// （版の違うセッションどうしが、互いのサーバーを止めて起動し直すのを繰り返さないように）
 const running = await ourServer(basePort)
 // 共用するのは、同じ合言葉で署名を返した本物のサーバーだけ（ほかのアプリがポートを取っていても、合言葉を渡さない）
-if (running && running.verified && running.web === webRoot && running.version === SERVER_VERSION) {
+if (running && running.verified && (shareOnly || (running.web === webSignature && running.version === SERVER_VERSION))) {
   emit({ kind: 'shared', port: basePort, token, url: `http://127.0.0.1:${basePort}/?token=${token}` })
   // 知らせを書き終えてから終わる（すぐ終えると、パイプに書き切れないことがある）
   setTimeout(() => process.exit(0), 100)
 } else {
-  await stopOldServers()
+  // 共用だけのセッションは、動いているサーバーを止めない（起動確認が一時的に答えなかっただけかもしれないため）
+  if (!shareOnly) await stopOldServers()
   listen(LISTEN_RETRIES)
 }

@@ -94,11 +94,22 @@ async function save() {
     else await addDictWord(word)
     message.value = `「${word.surface}」を「${word.pronunciation}」と読むように登録しました`
     resetForm()
-    words.value = await listDictWords()
+    await refreshAfterSuccess()
   } catch (err) {
     message.value = err instanceof Error ? err.message : '辞書に登録できませんでした'
   } finally {
     busy.value = false
+  }
+}
+
+/**
+ * 操作が済んだあとに一覧を読み直す。読み直せなくても、済んだ操作を失敗とは伝えない
+ */
+async function refreshAfterSuccess() {
+  try {
+    words.value = await listDictWords()
+  } catch {
+    message.value += '（一覧を読み直せませんでした。少ししてから開き直してください）'
   }
 }
 
@@ -108,8 +119,8 @@ async function remove(word: DictWord) {
   try {
     await removeDictWord(word.uuid)
     if (editing.value === word.uuid) resetForm()
-    words.value = await listDictWords()
     message.value = `「${word.surface}」を辞書から削除しました`
+    await refreshAfterSuccess()
   } catch (err) {
     message.value = err instanceof Error ? err.message : '辞書から削除できませんでした'
   } finally {

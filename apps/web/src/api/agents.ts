@@ -6,7 +6,7 @@ import type {
   SuggestVoiceResponse,
 } from '@aicarnation/shared'
 import { ApiError, apiFetch, errorFromResponse } from './client'
-import { IS_COMPANION, companionHeaders } from '../runtime'
+import { IS_COMPANION, companionFetch } from '../runtime'
 import type { Suggestion } from '../behavior/proactive'
 
 /**
@@ -16,9 +16,9 @@ import type { Suggestion } from '../behavior/proactive'
 async function askCompanion<T>(op: string, payload: unknown): Promise<T> {
   let res: Response
   try {
-    res = await fetch('/companion/request', {
+    res = await companionFetch('/companion/request', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...companionHeaders() },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ op, payload }),
     })
   } catch {
@@ -87,9 +87,9 @@ export function suggestProactive(): Promise<Suggestion> {
 
 /** 逆提案を話したことを知らせる（提案の記録に残る）。失敗しても何もしない */
 export function reportProactiveSpoken(id: string): void {
-  void fetch('/companion/proactive/spoken', {
+  void companionFetch('/companion/proactive/spoken', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...companionHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
   }).catch(() => undefined)
 }

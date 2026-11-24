@@ -63,8 +63,9 @@ async function findAsset(engineId) {
   const url = String(asset.browser_download_url ?? '')
   if (!url.startsWith(`https://github.com/${engine.repo}/releases/download/`)) throw new Error(`${engine.label} の配布ファイルの取得元が想定と違います`)
   const name = basename(String(asset.name)).replace(/[\\/:*?"<>|]/g, '_')
-  // GitHub が示すファイルの SHA-256 があれば、ダウンロードしたものと照らし合わせる
+  // GitHub が示すファイルの SHA-256 と、ダウンロードしたものを照らし合わせる。示されていなければ、照合できないので入れない
   const sha256 = typeof asset.digest === 'string' && /^sha256:[0-9a-f]{64}$/.test(asset.digest) ? asset.digest.slice(7) : null
+  if (!sha256) throw new Error(`${engine.label} の配布ファイルの SHA-256 が分からないため、自動では入れられません。公式のページから入れてください`)
   return { engine: engineId, label: engine.label, version: String(release.tag_name ?? ''), name, size: asset.size, url, sha256 }
 }
 

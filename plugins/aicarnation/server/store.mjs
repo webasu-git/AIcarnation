@@ -23,32 +23,82 @@ export function createStore(dataDir) {
   /** 書き込みは1つずつ順に行う（同時に書くとファイルが壊れるため） */
   let writing = Promise.resolve()
 
-  async function load(name) {
-    let map = cache.get(name)
-    if (map) return map
-    map = new Map()
+  /**
+   * 保存ファイルを読む。無ければ空から始める。壊れていれば、そのファイルを別の名前で残してから空から始める（中身を失わない）。
+   * それ以外で読めないとき（ほかのアプリがファイルを使っているなど）は失敗を返し、覚えない（次の問い合わせで読み直す）。
+   * 一時的に読めなかっただけで空と覚えると、画面が「データが無い」と判断して、保存済みのデータを上書きしてしまう。
+   * 読み込み中の Promise も覚えて分け合う（同時に読むと別々の中身ができ、片方の保存が消えるため）
+   */
+  function load(name) {
+    const cached = cache.get(name)
+    if (cached) return cached
+    const loading = readMap(name)
+    cache.set(name, loading)
+    // 読めなかったら覚えない（次の問い合わせで読み直す）
+    loading.catch(() => {
+      if (cache.get(name) === loading) cache.delete(name)
+    })
+    return loading
+  }
+
+  async function readMap(name) {
+    const map = new Map()
+    const file = join(dataDir, `${name}.json`)
+    let text = null
     try {
-      const raw = JSON.parse(await readFile(join(dataDir, `${name}.json`), 'utf8'))
-      for (const [k, v] of Object.entries(raw ?? {})) map.set(k, v)
-    } catch {
-      // まだ無い・壊れている：空から始める
+      text = await readFile(file, 'utf8')
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err
     }
-    cache.set(name, map)
+    if (text === null) return map
+    let parsed
+    try {
+      parsed = JSON.parse(text) ?? {}
+    } catch {
+      // 壊れたファイルは別の名前で残す。残せなければ失敗を返す（空で始めると、次の保存で壊れたファイルの中身が消える）
+      await replace(file, join(dataDir, `${name}.broken-${Date.now()}.json`))
+      return map
+    }
+    for (const [k, v] of Object.entries(parsed)) map.set(k, v)
     return map
   }
 
-  /** 一時ファイルに書いてから置き換える（途中で止まっても前のデータが残る） */
+  /** ファイルを置き換える。Windows では、ほかのアプリ（ウイルス対策など）が一瞬つかんでいて失敗することがあるので、少し待って試し直す */
+  async function replace(from, to) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await rename(from, to)
+      } catch (err) {
+        if (attempt >= 5 || !['EPERM', 'EBUSY', 'EACCES'].includes(err?.code)) throw err
+        await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)))
+      }
+    }
+  }
+
+  /**
+   * 一時ファイルに書いてから置き換える（途中で止まっても前のデータが残る）。
+   * 失敗したら失敗を返す（画面が保存できなかったと分かるように）。そのときは覚えている中身を捨て、次はファイルから読み直す
+   */
   function save(name, map) {
     const body = JSON.stringify(Object.fromEntries(map))
-    writing = writing
-      .then(async () => {
-        await mkdir(dataDir, { recursive: true })
-        const file = join(dataDir, `${name}.json`)
-        await writeFile(`${file}.tmp`, body)
-        await rename(`${file}.tmp`, file)
+    const done = writing.then(async () => {
+      await mkdir(dataDir, { recursive: true })
+      const file = join(dataDir, `${name}.json`)
+      await writeFile(`${file}.tmp`, body)
+      await replace(`${file}.tmp`, file)
+    })
+    // 次の書き込みは、この書き込みが失敗しても続ける
+    writing = done.catch(() => undefined)
+    return done.catch((err) => {
+      // 覚えている中身はファイルとずれたので、読み直す。ただし、すでに並んでいる書き込みが終わってから読む
+      // （先に読むと、そのあと書かれる分を含まない中身で、次の保存が上書きしてしまう）
+      const reload = writing.then(() => readMap(name))
+      cache.set(name, reload)
+      reload.catch(() => {
+        if (cache.get(name) === reload) cache.delete(name)
       })
-      .catch(() => undefined)
-    return writing
+      throw err
+    })
   }
 
   const vrmDir = join(dataDir, 'vrm')

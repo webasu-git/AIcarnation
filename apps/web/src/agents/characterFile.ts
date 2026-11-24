@@ -1,4 +1,6 @@
 import type { AgentBackground, AgentDefinition, AgentMissing, AgentVoice } from '@aicarnation/shared'
+import { HEX_COLOR, inRange, isValidVoiceNumbers } from '@aicarnation/shared'
+import { MOTION_ROLES } from '../vrm/motion/clips'
 import type { EngineStyle } from '../voice/engines'
 import { engineVoiceURI, parseEngineVoiceURI } from '../voice/engines'
 
@@ -82,10 +84,29 @@ export function makeCharacterFile(agent: AgentDefinition, info: ExportInfo, now 
 const isString = (v: unknown): v is string => typeof v === 'string'
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every(isString)
 const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
-/** 数で、min〜max に収まっているか（NaN・無限大は通さない） */
-const inRange = (v: unknown, min: number, max: number): v is number => isFiniteNumber(v) && v >= min && v <= max
-/** 色の番号（#rgb・#rrggbb・#rrggbbaa）。背景の色は、画面の色選びとこの形だけを使う */
-const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
+/** 読みの辞書の 1 語の長さの上限（表記・読み） */
+const MAX_DICT_CHARS = 50
+/** 読み：全角カタカナと長音だけ（AivisSpeech のユーザー辞書が受け付ける形） */
+const KATAKANA = /^[ァ-ヴー]+$/
+/** 表記：制御文字を含まない */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
+
+/** 読みの辞書の 1 語として正しいか（表記と読みの長さ・文字の種類、アクセントの位置は 0〜読みの長さの整数） */
+function isDictWord(w: unknown): boolean {
+  const word = w as Partial<Record<string, unknown>> | null
+  return (
+    !!word &&
+    isString(word.surface) &&
+    word.surface.trim().length > 0 &&
+    word.surface.length <= MAX_DICT_CHARS &&
+    !CONTROL_CHARS.test(word.surface) &&
+    isString(word.pronunciation) &&
+    word.pronunciation.length <= MAX_DICT_CHARS &&
+    KATAKANA.test(word.pronunciation) &&
+    Number.isInteger(word.accentType) &&
+    inRange(word.accentType, 0, word.pronunciation.length)
+  )
+}
 
 /** 読み込んだ JSON がキャラクターの書き出しファイルか確かめる。だめなら理由を投げる */
 export function parseCharacterFile(data: unknown): CharacterFile {
@@ -101,23 +122,20 @@ export function parseCharacterFile(data: unknown): CharacterFile {
   // 声の数値は、画面で選べる範囲の数だけを受け付ける（0 や極端な値・数でない値が入ると、その声で話せなくなる）
   if (
     !v ||
-    !inRange(v.rate, 0.5, 2) ||
-    !inRange(v.pitch, 0, 2) ||
-    (v.intonation !== undefined && !inRange(v.intonation, 0, 2)) ||
-    (v.tempo !== undefined && !inRange(v.tempo, 0, 2)) ||
-    (v.emotional !== undefined && typeof v.emotional !== 'boolean') ||
+    !isValidVoiceNumbers(v) ||
     (v.speaker !== undefined && !isString(v.speaker)) ||
     (v.style !== undefined && !isString(v.style))
   ) {
     throw new Error('声の設定の形が正しくありません')
   }
   if (f.vrmFileName !== null && !isString(f.vrmFileName)) throw new Error('VRM のファイル名の形が正しくありません')
-  if (!Array.isArray(f.motions) || !f.motions.every((m) => isString(m?.role) && isString(m?.name))) {
+  // 動きの役は、アプリにある役だけを受け付ける（知らない役の割り当てを保存しない）
+  if (!Array.isArray(f.motions) || !f.motions.every((m) => isString(m?.role) && (MOTION_ROLES as readonly string[]).includes(m.role) && isString(m?.name))) {
     throw new Error('動きの割り当ての形が正しくありません')
   }
   if (
     !Array.isArray(f.dictionary) ||
-    !f.dictionary.every((w) => isString(w?.surface) && isString(w?.pronunciation) && typeof w?.accentType === 'number')
+    !f.dictionary.every(isDictWord)
   ) {
     throw new Error('読みの辞書の形が正しくありません')
   }

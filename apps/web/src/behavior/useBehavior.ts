@@ -7,7 +7,7 @@ import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
 import { BehaviorDirector, DEFAULT_TIMING, scaleTiming, timingForSettings } from './director'
 import { loadLineBook } from './lineBook'
-import { DEFAULT_LINES, type LineBook, type Scene } from './lines'
+import { DEFAULT_LINES, personaSignature, type LineBook, type Scene } from './lines'
 import type { MotionRole } from '../vrm/motion/clips'
 import type { IdleBody } from './director'
 import { DEFAULT_REACTION_TIMING, LineReactor, type ReactionTiming } from './reactions'
@@ -104,13 +104,19 @@ export function useBehavior(
   }
 
   // 選んでいるエージェントの台詞帳を読む（無ければ作る）
+  // 台詞帳を作るのは、声を出すと決まった画面だけ（画面が複数開いていても、モデルを何度も呼ばない）。
+  // 役が決まる前・声を出さない画面は、保存済みのものを読むだけ。あとから声を出す役になったら読み直す
   watch(
-    () => agents.current,
-    async (agent) => {
-      book = DEFAULT_LINES
-      if (!agent) return
-      const loaded = await loadLineBook(agent)
-      if (agents.current?.id === agent.id) book = loaded
+    [() => agents.current, () => chat.speakerRole],
+    async ([agent, role]) => {
+      if (!agent) {
+        book = DEFAULT_LINES
+        return
+      }
+      const loaded = await loadLineBook(agent, { generate: role === 'speaker' })
+      // 読んでいる間に、別のキャラクターに切り替えた・人柄を変えたときは使わない
+      const now = agents.current
+      if (now?.id === agent.id && personaSignature(now) === personaSignature(agent)) book = loaded
     },
     { immediate: true },
   )
@@ -164,7 +170,9 @@ export function useBehavior(
     // 段階C：放置が続いたら、最近の会話の記録からアバターが続きを提案する（同梱版。会話の記録と逆提案がオンのとき）
     const p = (proactive = new ProactiveSuggester(
       {
-        enabled: () => IS_COMPANION && settings.proactiveEnabled && settings.conversationLog && connection.value === 'connected',
+        // 画面が複数開いているときは、声を出す画面だけが提案を作る（それぞれが作ると、モデルを二重に呼ぶ）
+        enabled: () =>
+          IS_COMPANION && settings.proactiveEnabled && settings.conversationLog && connection.value === 'connected' && chat.isBridgeSpeaker(),
         busy: () => chat.conversing,
         request: suggestProactive,
         say: (raw) => chat.performReaction(raw),

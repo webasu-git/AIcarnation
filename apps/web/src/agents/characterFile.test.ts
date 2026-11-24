@@ -155,4 +155,30 @@ describe('キャラクターの書き出しファイル', () => {
     expect(pruneMissing({ ...agent, missing })).toEqual(missing)
     expect(pruneMissing({ ...agent, missing, icon: { fileId: 'x', name: 'face.png', x: 0.5, y: 0.5, zoom: 1 } })).toBeUndefined()
   })
+
+  it('読みの辞書は、表記・読み（カタカナ）・アクセントの位置が正しい語だけを受け付ける', () => {
+    const file = makeCharacterFile(agent, { vrmFileName: null, engineStyle: null, dictionary: [] })
+    const withWord = (word: Record<string, unknown>) => ({ ...file, dictionary: [{ surface: '篠', pronunciation: 'シノ', accentType: 1, ...word }] })
+    expect(() => parseCharacterFile(withWord({}))).not.toThrow()
+    for (const word of [
+      { accentType: 1.5 },
+      { accentType: -1 },
+      { accentType: 3 },
+      { pronunciation: 'しの' },
+      { pronunciation: 'shino' },
+      { pronunciation: 'シ'.repeat(51), accentType: 0 },
+      { surface: ' ' },
+      { surface: 'あ'.repeat(51) },
+      { surface: 'a' + String.fromCharCode(0) },
+    ]) {
+      expect(() => parseCharacterFile(withWord(word)), JSON.stringify(word)).toThrow('読みの辞書')
+    }
+  })
+
+  it('動きの割り当ては、アプリにある役だけを受け付ける', () => {
+    const file = makeCharacterFile(agent, { vrmFileName: null, engineStyle: null, dictionary: [] })
+    expect(() => parseCharacterFile({ ...file, motions: [{ role: 'dance', name: 'x.fbx' }] })).toThrow('動きの割り当て')
+    expect(() => parseCharacterFile({ ...file, motions: [{ role: '__proto__', name: 'x.fbx' }] })).toThrow('動きの割り当て')
+    expect(() => parseCharacterFile({ ...file, motions: [{ role: 'joy', name: 'x.fbx' }] })).not.toThrow()
+  })
 })

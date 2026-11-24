@@ -1,4 +1,4 @@
-import { companionHeaders } from '../runtime'
+import { companionFetch } from '../runtime'
 import type { StoreName } from './idb'
 
 /**
@@ -19,7 +19,7 @@ function keyString(key: IDBValidKey): string {
 }
 
 async function call(path: string, init: RequestInit = {}): Promise<Response> {
-  const res = await fetch(path, { ...init, headers: { ...companionHeaders(), ...init.headers } })
+  const res = await companionFetch(path, init)
   if (!res.ok && res.status !== 404) throw new Error(`保存できませんでした（${res.status}）`)
   return res
 }

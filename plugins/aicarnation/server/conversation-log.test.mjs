@@ -123,3 +123,18 @@ test('長くて意地の悪い入力でも、整形がすぐ終わる', () => {
   assert.equal(cleanText('前<system-reminder a="1">秘密</system-reminder>後 <system-reminder>閉じていない'), '前 後 閉じていない')
   assert.equal(cleanText('a\n\n  b  \n\t\nc'), 'a\nb\nc')
 })
+
+test('残す日数の設定を読めなかったとき（null）は、古い記録を消さない', async () => {
+  const data = await mkdtemp(join(tmpdir(), 'aicarnation-log-null-'))
+  try {
+    const now = new Date(2026, 10, 23, 9, 0, 0)
+    const log = createConversationLog(data, () => now)
+    await mkdir(log.dir, { recursive: true })
+    await writeFile(join(log.dir, '2026-01-01.jsonl'), '{}\n')
+    await log.prune(null)
+    await log.append({ type: 'listening', text: 'おはよう' }, null)
+    assert.ok((await readdir(log.dir)).includes('2026-01-01.jsonl'))
+  } finally {
+    await rm(data, { recursive: true, force: true })
+  }
+})

@@ -139,8 +139,12 @@ export function createConversationLog(dataDir, now = () => new Date()) {
   /** 最後に古い記録を消した日（1日1回だけ消す） */
   let prunedDay = null
 
-  /** 残す日数より古い日のファイルを消す。今日を1日目として数える */
+  /**
+   * 残す日数より古い日のファイルを消す。今日を1日目として数える。
+   * days が null（設定を読めなかった）のときは消さない（既定の日数で消すと、長く残す設定の記録を失う）
+   */
   async function prune(days) {
+    if (days === null) return []
     const keep = retentionDays(days)
     const date = now()
     const today = localStamp(date).day
@@ -172,7 +176,7 @@ export function createConversationLog(dataDir, now = () => new Date()) {
     const { day } = localStamp(date)
     writing = writing
       .then(async () => {
-        if (prunedDay !== day) await prune(days)
+        if (prunedDay !== day && days !== null) await prune(days)
         await mkdir(dir, { recursive: true, mode: 0o700 })
         await appendFile(join(dir, `${day}.jsonl`), `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 })
       })

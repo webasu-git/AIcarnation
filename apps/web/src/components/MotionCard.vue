@@ -116,7 +116,7 @@ async function addPending() {
     <div class="talk-gestures">
       <ToggleSwitch
         :model-value="agents.current?.talkGestures !== false"
-        @update:model-value="(on: boolean) => agents.current && agents.update(agents.current.id, { talkGestures: on })"
+        @update:model-value="(on: boolean) => agents.current && agents.update(agents.current.id, { talkGestures: on }).catch(() => undefined)"
       >
         話すときに手ぶりをする
       </ToggleSwitch>

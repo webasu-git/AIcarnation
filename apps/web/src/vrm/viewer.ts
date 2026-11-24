@@ -246,8 +246,11 @@ export class VrmViewer {
    * 役に動きのファイル（.vrma か Mixamo の .fbx のデータ）をパターンの1つとして足す。同じ id なら入れ替える。
    * どちらとしても読めなければ例外（登録はしない）
    */
-  async addMotionFile(role: MotionRole, id: string, data: ArrayBuffer, name = ''): Promise<void> {
-    this.motions.add(role, id, await parseMotion(data), name)
+  async addMotionFile(role: MotionRole, id: string, data: ArrayBuffer, name = '', stillWanted: () => boolean = () => true): Promise<void> {
+    const motion = await parseMotion(data)
+    // 解析している間に、ほかのキャラクターに切り替わった（足すと、切り替えた先に前の動きが混ざる）
+    if (!stillWanted()) return
+    this.motions.add(role, id, motion, name)
   }
 
   /** 役から動きのパターンを外す */

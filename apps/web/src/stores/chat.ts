@@ -1,3 +1,4 @@
+import { setWindowTimeout } from '../pip/windowTimer'
 import { defineStore } from 'pinia'
 import { computed, markRaw, ref, shallowRef } from 'vue'
 import {
@@ -67,11 +68,26 @@ export const useChatStore = defineStore('chat', () => {
     getWindow = windowGetter
   }
 
+  /** 履歴を読めなかったキャラクター（そのキャラクターの会話は、読み直せるまで保存しない） */
+  let unreadableHistory: string | null = null
+
   /** エージェントを切り替えたときに、そのエージェントの履歴を読み込む */
   async function load(id: string) {
     agentId.value = id
     error.value = ''
-    const loaded = await loadMessages(id)
+    let loaded: MessageRecord[]
+    try {
+      loaded = await loadMessages(id)
+    } catch {
+      // 読めなかった：前のキャラクターの履歴を残さない（表示にも、送る履歴にも混ざらないように）
+      if (agentId.value === id) {
+        records.value = []
+        unreadableHistory = id
+        error.value = '会話の履歴を読み込めませんでした。画面を再読み込みしてください（それまでの会話は保存しません）'
+      }
+      return
+    }
+    if (unreadableHistory === id) unreadableHistory = null
     // 読み込み中に別のエージェントへ切り替わっていたら捨てる
     if (agentId.value === id) records.value = loaded
   }
@@ -86,6 +102,8 @@ export const useChatStore = defineStore('chat', () => {
       createdAt: new Date().toISOString(),
     }
     records.value.push(record)
+    // 履歴を読めなかったキャラクターの会話は保存しない（番号が 1 からになり、保存済みの履歴を上書きしてしまう）
+    if (unreadableHistory === id) return
     await saveMessage(record)
   }
 
@@ -111,21 +129,20 @@ export const useChatStore = defineStore('chat', () => {
 
   /** 返事を話し終えてから、感情の表情を普段の顔に戻すまでの時間 */
   const FACE_HOLD_MS = 1500
-  let faceTimer: number | undefined
+  let cancelFaceTimer = () => {}
 
   /**
    * 話し終えたら、少し余韻を残してから普段の顔に戻す。
    * 笑顔（目を細める）や驚き（口を開ける）などの表情は、次の感情タグが来るまで残ってしまうため
    */
   function relaxFace(control: AvatarControl) {
-    const win = getWindow()
-    win.clearTimeout(faceTimer)
-    faceTimer = win.setTimeout(() => control.setEmotion('neutral'), FACE_HOLD_MS)
+    cancelFaceTimer()
+    cancelFaceTimer = setWindowTimeout(getWindow(), () => control.setEmotion('neutral'), FACE_HOLD_MS)
   }
 
   /** 新しいやり取りが始まったら、普段の顔に戻す予定は取り消す（その場で戻す） */
   function cancelRelaxFace() {
-    getWindow().clearTimeout(faceTimer)
+    cancelFaceTimer()
   }
 
   /** 会話の出来事（発言・Claude Code の合図）を知りたい相手。ひとりで過ごす行動の監督が使う */
@@ -145,7 +162,8 @@ export const useChatStore = defineStore('chat', () => {
   /** 文字送り・読み上げを止める。応答の受信が終わっていれば、全文が履歴に残る */
   async function stopPerforming() {
     activePerformer?.cancel()
-    if (activeTask) await activeTask
+    // 前の応答が失敗で終わっていても、次の入力は受け付ける
+    if (activeTask) await activeTask.catch(() => undefined)
   }
 
   async function send(text: string) {
@@ -160,8 +178,11 @@ export const useChatStore = defineStore('chat', () => {
     if (!control || !agent || agent.id !== agentId.value) return
     const task = respond(control, agent, content)
     activeTask = task
-    await task
-    if (activeTask === task) activeTask = null
+    try {
+      await task
+    } finally {
+      if (activeTask === task) activeTask = null
+    }
   }
 
   async function respond(control: AvatarControl, agent: AgentDefinition, content: string) {
@@ -173,7 +194,6 @@ export const useChatStore = defineStore('chat', () => {
     // 話しかけられたらうなずいて、返事が届くまで考える姿勢にする
     control.nod()
     control.setMotion('thinking')
-    await append(agent.id, 'user', content, null)
 
     const parser = new EmotionStreamParser()
     let raw = ''
@@ -184,6 +204,8 @@ export const useChatStore = defineStore('chat', () => {
     activePerformer = performer
 
     try {
+      // 発言の保存も try の中で行う（保存できなくても、送信中の印を残さず、次の入力を受け付けるように）
+      await append(agent.id, 'user', content, null)
       await streamChat(
         { agentId: agent.id, systemPrompt: agent.systemPrompt, messages: recentHistory(records.value) },
         {
@@ -232,21 +254,69 @@ export const useChatStore = defineStore('chat', () => {
    * 画面が複数開いているとき、声を出すのはこの画面か（同梱サーバー・開発サーバーが決める）。
    * 声を出さない画面も、表情・口パク・吹き出しは同じように動かす
    */
-  let bridgeSpeaker = true
+  /** サーバーが決めた、この画面の役（まだ知らせが届いていなければ unknown。そのあいだは声を出す） */
+  const speakerRole = ref<'unknown' | 'speaker' | 'listener'>('unknown')
+  /** この画面が声を出す画面か（画面が複数開いているときは、サーバーが決めた1つだけ） */
+  function isBridgeSpeaker(): boolean {
+    return speakerRole.value !== 'listener'
+  }
   function setBridgeSpeaker(value: boolean) {
-    bridgeSpeaker = value
+    speakerRole.value = value ? 'speaker' : 'listener'
   }
 
   /** 「聞いている」から「考えている」に移るまでの時間 */
   const LISTEN_TO_THINK_MS = 1200
-  let thinkTimer: number | undefined
+  let cancelThinkTimer = () => {}
   /**
    * 「まとめています」を出しておく時間の上限。要約は数秒で終わる。
    * 要約の途中で Claude Code のセッションが閉じた・mod が読み込み直された・要約に失敗したときは、
    * 終わりの合図（返事か待機）が届かないので、時間がたったら待機に戻す（表示が残り続けないように）
    */
   const SUMMARY_TIMEOUT_MS = 60_000
-  let summaryTimer: number | undefined
+  let cancelSummaryTimer = () => {}
+  /**
+   * 「考え中」・作業中の表示を、合図が長く途絶えたら消すまでの時間。終わりの合図が届かない
+   * （接続が切れている間に作業が終わった・セッションが途中で閉じた）と、表示が残り、独り言や逆提案も止まったままになる
+   */
+  const STALE_STATUS_MS = 15 * 60_000
+  let cancelStaleTimer = () => {}
+
+  /** 「考え中」・作業中の表示を消して、待機に戻す（つなぎ直したとき・合図が長く途絶えたとき） */
+  function resetBridgeStatus() {
+    cancelThinkTimer()
+    cancelSummaryTimer()
+    cancelStaleTimer()
+    if (!bridgeStatus.value) return
+    bridgeStatus.value = ''
+    if (!activePerformer) avatar.value?.setMotion('idle')
+  }
+
+  /**
+   * つなぎ直したとき、サーバーが覚えている今の様子（考え中・作業中）を戻す。
+   * 合図そのものを送り直すと、うなずきや吹き出しが繰り返されるので、表示と姿勢だけを戻す
+   */
+  function restoreBridgeStatus(label: string) {
+    if (!label) return
+    bridgeStatus.value = label
+    if (!activePerformer) avatar.value?.setMotion(label === '考え中' || label === 'まとめています' ? 'thinking' : 'working')
+    const win = getWindow()
+    // 「まとめています」は、ふだんと同じく 60 秒で待機に戻す（要約の途中でセッションが閉じても残らないように）
+    if (label === 'まとめています') {
+      cancelSummaryTimer()
+      cancelSummaryTimer = setWindowTimeout(win, () => {
+        if (bridgeStatus.value !== 'まとめています') return
+        bridgeStatus.value = ''
+        if (!activePerformer) avatar.value?.setMotion('idle')
+      }, SUMMARY_TIMEOUT_MS)
+    }
+    armStaleStatus(win)
+  }
+
+  /** 表示を出したら、合図が長く途絶えたときに消す予定を入れ直す */
+  function armStaleStatus(win: Window) {
+    cancelStaleTimer()
+    cancelStaleTimer = setWindowTimeout(win, resetBridgeStatus, STALE_STATUS_MS)
+  }
 
   /** Claude Code の mod から届いた合図に合わせて、アバターを反応させる */
   async function handleBridgeEvent(event: BridgeEvent) {
@@ -259,8 +329,9 @@ export const useChatStore = defineStore('chat', () => {
       notifyActivity(event)
       return
     }
-    win.clearTimeout(thinkTimer)
-    win.clearTimeout(summaryTimer)
+    cancelThinkTimer()
+    cancelSummaryTimer()
+    cancelStaleTimer()
     switch (event.type) {
       case 'listening':
         // 話しかけられたら、前の返答の読み上げはやめて、うなずいて聞く。少ししたら考える姿勢に移る
@@ -275,7 +346,8 @@ export const useChatStore = defineStore('chat', () => {
         control.setEmotion('neutral')
         control.nod()
         control.setMotion('listening')
-        thinkTimer = win.setTimeout(() => control.setMotion('thinking'), LISTEN_TO_THINK_MS)
+        cancelThinkTimer = setWindowTimeout(win, () => control.setMotion('thinking'), LISTEN_TO_THINK_MS)
+        armStaleStatus(win)
         notifyActivity(event)
         return
       case 'working':
@@ -283,12 +355,13 @@ export const useChatStore = defineStore('chat', () => {
         // 要約を作っている間は考える姿勢、ツールを使っている間は作業の姿勢
         if (!activePerformer) control.setMotion(event.label === 'まとめています' ? 'thinking' : 'working')
         if (event.label === 'まとめています') {
-          summaryTimer = win.setTimeout(() => {
+          cancelSummaryTimer = setWindowTimeout(win, () => {
             if (bridgeStatus.value !== 'まとめています') return
             bridgeStatus.value = ''
             if (!activePerformer) control.setMotion('idle')
           }, SUMMARY_TIMEOUT_MS)
         }
+        armStaleStatus(win)
         notifyActivity(event)
         return
       case 'idle':
@@ -302,8 +375,11 @@ export const useChatStore = defineStore('chat', () => {
         bridgeStatus.value = ''
         const task = performBridgeReply(control, event.text)
         activeTask = task
-        await task
-        if (activeTask === task) activeTask = null
+        try {
+          await task
+        } finally {
+          if (activeTask === task) activeTask = null
+        }
       }
     }
   }
@@ -345,7 +421,7 @@ export const useChatStore = defineStore('chat', () => {
     }
     if (inBridge) bridgePending.value = ''
     else pendingReply.value = ''
-    const performer = createPerformer(control, agents.current?.voice ?? DEFAULT_VOICE, show, () => !inBridge || bridgeSpeaker)
+    const performer = createPerformer(control, agents.current?.voice ?? DEFAULT_VOICE, show, () => !inBridge || isBridgeSpeaker())
     activePerformer = performer
     const parser = new EmotionStreamParser()
     performer.enqueue([...parser.push(raw), ...parser.flush()])
@@ -383,7 +459,7 @@ export const useChatStore = defineStore('chat', () => {
       (ch) => {
         bridgePending.value = (bridgePending.value ?? '') + ch
       },
-      () => bridgeSpeaker,
+      () => isBridgeSpeaker(),
     )
     activePerformer = performer
     const parser = new EmotionStreamParser()
@@ -402,14 +478,22 @@ export const useChatStore = defineStore('chat', () => {
 
   async function clear() {
     await stopPerforming()
-    if (!agentId.value) return
-    await clearMessages(agentId.value)
+    // 消すキャラクターを先に控える（消している間に切り替えても、切り替えた先の履歴や印を変えないように）
+    const id = agentId.value
+    if (!id) return
+    await clearMessages(id)
+    // 消せた（保存先に書ける）ので、履歴を読めなかったキャラクターでも、ここからの会話は保存してよい
+    if (unreadableHistory === id) unreadableHistory = null
+    if (agentId.value !== id) return
     records.value = []
     error.value = ''
     avatar.value?.setEmotion('neutral')
   }
 
   return {
+    resetBridgeStatus,
+    restoreBridgeStatus,
+    speakerRole,
     messages,
     sending,
     streaming,
@@ -423,6 +507,7 @@ export const useChatStore = defineStore('chat', () => {
     bridgeStatus,
     handleBridgeEvent,
     setBridgeSpeaker,
+    isBridgeSpeaker,
     onActivity,
     performReaction,
     conversing,

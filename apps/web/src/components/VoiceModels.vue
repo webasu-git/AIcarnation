@@ -47,11 +47,22 @@ async function onFile(e: Event) {
   try {
     await installAivmModel(file)
     message.value = `${file.name} を追加しました。エージェントの「声」からお選びいただけます。`
-    models.value = await listAivmModels()
+    await refreshAfterSuccess()
   } catch (err) {
     message.value = err instanceof Error ? err.message : `${file.name} を追加できませんでした`
   } finally {
     busy.value = false
+  }
+}
+
+/**
+ * 操作が済んだあとに一覧を読み直す。読み直せなくても、済んだ操作を失敗とは伝えない
+ */
+async function refreshAfterSuccess() {
+  try {
+    models.value = await listAivmModels()
+  } catch {
+    message.value += '（一覧を読み直せませんでした。少ししてから開き直してください）'
   }
 }
 
@@ -60,8 +71,8 @@ async function remove(model: AivmModel) {
   message.value = ''
   try {
     await uninstallAivmModel(model.uuid)
-    models.value = await listAivmModels()
     message.value = `${model.name} を外しました`
+    await refreshAfterSuccess()
   } catch (err) {
     message.value = err instanceof Error ? err.message : 'モデルを外せませんでした'
   } finally {

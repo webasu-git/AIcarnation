@@ -2,6 +2,7 @@
 import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import type { AgentVrmRef, UsageResponse } from '@aicarnation/shared'
 import { fetchUsage } from './api/usage'
+import { deleteVrmFile } from './db/vrmFiles'
 import VrmStage from './components/VrmStage.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import AgentPanel from './components/AgentPanel.vue'
@@ -20,11 +21,11 @@ import { setSetupGuideClosed, setupGuideClosed, setupGuideExpanded } from './com
 import { engineWarmup, parseEngineVoiceURI } from './voice/engines'
 import { unlockAudio } from './voice/audio'
 import { usePip } from './pip/usePip'
-import { useVrmLoader } from './useVrmLoader'
+import { PickSaveError, useVrmLoader } from './useVrmLoader'
 import { useBridge } from './bridge/useBridge'
 import { useBehavior } from './behavior/useBehavior'
 import { useMotionLibrary } from './motion/useMotionLibrary'
-import { IS_COMPANION, companionHeaders, isCompanionSessionValid } from './runtime'
+import { IS_COMPANION, companionFetch, isCompanionSessionValid, onCompanionRejected, wasTicketRefused } from './runtime'
 import { useSettingsStore } from './stores/settings'
 import { useChatStore } from './stores/chat'
 import { useAgentsStore } from './stores/agents'
@@ -33,6 +34,9 @@ import { useAgentsStore } from './stores/agents'
 const VoiceModels = defineAsyncComponent(() => import('./components/VoiceModels.vue'))
 const VoiceDictionary = defineAsyncComponent(() => import('./components/VoiceDictionary.vue'))
 const SourcesGuide = defineAsyncComponent(() => import('./components/SourcesGuide.vue'))
+
+/** 見出しに出す版の番号。開発版の長い番号（0.1.4-dev.202611241732）は日時を省く */
+const APP_VERSION = String(import.meta.env.VITE_APP_VERSION ?? '').replace(/^(\d+\.\d+\.\d+-dev)\..*$/, '$1')
 
 const settings = useSettingsStore()
 const chat = useChatStore()
@@ -140,9 +144,9 @@ async function addExcludedFolder() {
   pickingFolder.value = true
   pickFolderError.value = ''
   try {
-    const res = await fetch('/companion/pick-folder', {
+    const res = await companionFetch('/companion/pick-folder', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...companionHeaders() },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: 'Claude Code の作業の記録を読ませないフォルダを選んでください' }),
     })
     const body = (await res.json().catch(() => null)) as { path?: string | null; message?: string } | null
@@ -244,10 +248,50 @@ watch(
   },
 )
 
-/** 選択中のエージェントの見た目を変える */
-async function applyVrm(pick: Promise<AgentVrmRef | null>) {
-  const vrm = await pick
-  if (vrm && agents.current) await agents.update(agents.current.id, { vrm })
+/**
+ * 選択中のエージェントの見た目を変える。保存できなかったら、前の見た目に戻して知らせる
+ * （表示だけ新しいモデルのままにすると、開き直したときに戻って見える）
+ */
+async function applyVrm(file: File) {
+  const agent = agents.current
+  if (!agent) return
+  /** shown：保存できなかったモデル（文字列は、ファイルの保存もできなかったものの表示の参照） */
+  const failed = async (shown: AgentVrmRef | string) => {
+    if (typeof shown !== 'string') await deleteVrmFile(shown.ref).catch(() => undefined)
+    // 今も、このキャラクターで、保存できなかったモデルを表示しているときだけ戻す
+    // （選び直した・ほかのキャラクターに切り替えたときは、そちらの表示を崩さない）
+    if (agents.current?.id !== agent.id || !loader.isShowing(shown)) return
+    // 戻すのは、失敗した時点で保存されている見た目
+    const saved = agents.agents.find((a) => a.id === agent.id)?.vrm
+    if (!saved) return
+    await loader.restore(saved)
+    // 戻している間に、切り替えた・選び直したときは知らせない
+    if (agents.current?.id !== agent.id) return
+    if (loader.isShowing(shown)) {
+      // 戻せなかった（前のモデルを読めなかった）：保存できなかったモデルを表示したままにしない
+      loader.unshow()
+      loader.error.value = '3D モデルを保存できず、前のモデルにも戻せませんでした。少し待ってから、もう一度お選びください'
+    } else if (loader.isShowing(saved)) {
+      // 前のモデルがあるはずなのに表示できていない（ファイルが無い）ときだけ、そのことも伝える
+      loader.error.value =
+        saved.source === 'local' && !loader.current.value
+          ? '3D モデルを保存できませんでした（前のモデルのファイルも見つかりません）。もう一度お選びください'
+          : '3D モデルを保存できませんでした。少し待ってから、もう一度お選びください'
+    }
+  }
+  let vrm: AgentVrmRef | null
+  try {
+    vrm = await loader.pickFile(file)
+  } catch (err) {
+    if (err instanceof PickSaveError) await failed(err.shownKey)
+    return
+  }
+  if (!vrm) return
+  try {
+    await agents.update(agent.id, { vrm })
+  } catch {
+    await failed(vrm)
+  }
 }
 
 
@@ -265,7 +309,8 @@ watch(
   { immediate: true },
 )
 function toggleSteadyWaist(on: boolean) {
-  if (agents.current) void agents.update(agents.current.id, { steadyWaist: on })
+  // 保存できなかったときは、画面の上の知らせで伝える（ここで受け取って、処理されない失敗にしない）
+  if (agents.current) agents.update(agents.current.id, { steadyWaist: on }).catch(() => undefined)
 }
 // 話すときの手ぶりも、キャラクターごと（無ければオン。切り替えは「動き」タブ）
 watch(
@@ -275,7 +320,7 @@ watch(
 )
 
 function onModelFile(file: File) {
-  void applyVrm(loader.pickFile(file))
+  void applyVrm(file)
 }
 
 /** はじめての案内から、動きのタブへ移る */
@@ -286,18 +331,20 @@ function showMotions() {
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
-  if (file) void applyVrm(loader.pickFile(file))
+  if (file) void applyVrm(file)
   input.value = ''
 }
 
 function onDrop(e: DragEvent) {
   dragging.value = false
   const file = e.dataTransfer?.files[0]
-  if (file) void applyVrm(loader.pickFile(file))
+  if (file) void applyVrm(file)
 }
 
 /** 同梱版で、前のセッションの画面を開いている（合言葉が古い） */
 const sessionExpired = ref(false)
+/** 開いた URL の使い捨ての券が使えなかった（案内の文を変える） */
+const ticketRefused = ref(false)
 
 onMounted(async () => {
   // 音声エンジンの声は、画面を一度操作するまで鳴らせない。操作のたびに再生を許可しておく
@@ -309,20 +356,77 @@ onMounted(async () => {
     chat.attachAvatar(viewer, () => stageEl.value?.ownerDocument.defaultView ?? window)
     behavior.start()
   }
-  // 同梱版のデータは同梱サーバーにあるので、合言葉が古いと何も読めない。読み込む前に確かめて案内する
-  if (IS_COMPANION && !(await isCompanionSessionValid())) {
-    sessionExpired.value = true
+  // 同梱版のデータは同梱サーバーにあるので、合言葉が古いと何も読めない。読み込む前に確かめて案内する。
+  // サーバーの入れ替え（プラグインの更新など）の一瞬に開いただけのこともあるので、少し待って何度か確かめる
+  if (IS_COMPANION && !(await waitForCompanionSession(SESSION_CHECK_TRIES))) {
+    showSessionExpired()
     return
   }
-  await Promise.all([settings.load(), agents.load()])
-  void refreshUsage()
-  await motionLibrary.loadAll()
-  motionsLoaded.value = true
-  // 動きはキャラクターごとに持つので、切り替えたら読み込み直す
+  // 使っている途中で合言葉が古くなった（Claude Code を開き直した）ときも、断られたら確かめて案内する
+  if (IS_COMPANION) onCompanionRejected(() => void checkSessionAfterRejection())
+  // 動きはキャラクターごとに持つので、切り替えたら読み込み直す（読み込みが失敗しても、切り替えには付いていけるよう先に見張る）
   watch(
     () => agents.current?.id,
     () => void motionLibrary.loadAll(),
   )
+  // 設定とキャラクターは別々に読む。片方が読めなくても、残りの準備（動きのファイルなど）は続ける
+  const [, agentsResult] = await Promise.allSettled([settings.load(), agents.load()])
+  if (agentsResult.status === 'rejected') agentsLoadFailed.value = true
+  void refreshUsage()
+  await motionLibrary.loadAll().catch(() => undefined)
+  motionsLoaded.value = true
+})
+
+/** 起動のとき、合言葉が今のサーバーのものかを確かめる回数と間隔 */
+const SESSION_CHECK_TRIES = 8
+const SESSION_CHECK_MS = 750
+/** 「前のセッションの画面」と案内したあと、確かめ直す間隔 */
+const SESSION_RECHECK_MS = 5000
+
+/** 「前のセッションの画面です」と案内し、確かめ続ける。使えるようになったら開き直す（サーバーが戻ってきたとき） */
+function showSessionExpired() {
+  if (sessionExpired.value) return
+  sessionExpired.value = true
+  void wasTicketRefused().then((refused) => (ticketRefused.value = refused))
+  const timer = window.setInterval(async () => {
+    if (await isCompanionSessionValid()) {
+      window.clearInterval(timer)
+      location.reload()
+    }
+  }, SESSION_RECHECK_MS)
+}
+
+/** 問い合わせが断られたら、合言葉が今も使えるかを確かめる（同時に何度断られても、確かめるのは 1 回） */
+let checkingSession = false
+async function checkSessionAfterRejection() {
+  if (checkingSession || sessionExpired.value) return
+  checkingSession = true
+  try {
+    if (!(await waitForCompanionSession(SESSION_CHECK_TRIES))) showSessionExpired()
+  } finally {
+    checkingSession = false
+  }
+}
+
+/** 合言葉が今のサーバーのものか、何度か確かめる（サーバーが入れ替わっている一瞬は答えないことがある） */
+async function waitForCompanionSession(tries: number): Promise<boolean> {
+  for (let i = 0; i < tries; i++) {
+    if (await isCompanionSessionValid()) return true
+    await new Promise((resolve) => window.setTimeout(resolve, SESSION_CHECK_MS))
+  }
+  return false
+}
+
+/** キャラクターを読み込めなかった（保存先に一時的につながらないなど） */
+const agentsLoadFailed = ref(false)
+
+/** 保存・読み込みで困っていること（画面の上に出す。黙って失わない） */
+const storageProblem = computed(() => {
+  if (agentsLoadFailed.value) return 'キャラクターを読み込めませんでした。画面を再読み込みしてください。'
+  if (agents.unsaved.agents.length > 0) return 'キャラクターの変更を保存できませんでした。少し待ってから、もう一度変えてみてください。'
+  if (settings.unsaved.length > 0 || agents.unsaved.current) return '設定の一部を保存できませんでした。少したってから自動で保存し直します。'
+  if (settings.unreadable.length > 0) return '設定の一部を読み込めず、既定の値で表示しています。画面を再読み込みしてください。'
+  return ''
 })
 
 // --- 動きのファイル（.vrma・Mixamo の .fbx） ---
@@ -335,8 +439,17 @@ function clearHistory() {
 
 <template>
   <div v-if="sessionExpired" class="expired" role="alert">
-    <p class="expired-title">この画面は前のセッションのものです</p>
-    <p>お手数ですが、Claude Code で <code>/aicarnation</code> を実行して開き直してください。</p>
+    <template v-if="ticketRefused">
+      <p class="expired-title">この URL は使えなくなりました</p>
+      <p>
+        開く URL は 2 分以内に 1 回だけ使えます。お手数ですが、Claude Code で <code>/aicarnation</code> を実行するか、Claude Desktop
+        でアバターを開くよう頼んで、開き直してください。
+      </p>
+    </template>
+    <template v-else>
+      <p class="expired-title">この画面は前のセッションのものです</p>
+      <p>お手数ですが、Claude Code で <code>/aicarnation</code> を実行して開き直してください。</p>
+    </template>
   </div>
   <div class="app">
     <aside class="panel">
@@ -344,7 +457,9 @@ function clearHistory() {
         <img class="logo" src="/icons/logo.svg" alt="" width="34" height="34" />
         <div class="title">
           <h1><span class="title-ai">AI</span>carnation</h1>
-          <p>with {{ agents.current?.name ?? 'あなたの相棒' }}</p>
+          <p>
+            with {{ agents.current?.name ?? 'あなたの相棒' }}<span class="version">Ver {{ APP_VERSION }}</span>
+          </p>
         </div>
         <button
           v-if="pip.support !== 'none'"
@@ -376,6 +491,7 @@ function clearHistory() {
         <p v-if="bridge.connection.value === 'connecting' || bridge.connection.value === 'error'" class="banner" :class="{ error: bridge.connection.value === 'error' }">
           {{ BRIDGE_LABELS[bridge.connection.value] }}
         </p>
+        <p v-if="storageProblem" class="banner error" role="alert">{{ storageProblem }}</p>
 
 
         <template v-if="tab === 'character'">
@@ -705,6 +821,13 @@ function clearHistory() {
   font-size: 0.8rem;
   letter-spacing: 0.04em;
   color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 版の番号は、名前の右に同じ書体で */
+.title .version {
+  margin-left: 0.8em;
 }
 /* 小窓ボタンは、ロゴの金に合わせた細い縁で控えめに */
 .pip-button {

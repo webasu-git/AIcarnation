@@ -8,6 +8,7 @@ import {
   type BridgeEvent,
   type BridgePersona,
 } from '../../../packages/shared/src/bridge'
+import { isCrossSite } from './sameOrigin'
 
 const MAX_BODY_BYTES = 64 * 1024
 const KEEP_ALIVE_MS = 20_000
@@ -81,13 +82,11 @@ export function aicarnationDevBridge(): Plugin {
     configureServer(server) {
       server.middlewares.use('/bridge', (req, res, next) => {
         if (!isLoopback(req)) return send(res, 403, { message: 'このPCからだけ使えます' })
-        // ほかのページ（同じ PC の別の開発サーバーなど）からは使わせない。画面そのもの（同じオリジン）と、
-        // Origin を付けない mod（Claude Code）からだけ受け付ける
-        const origin = req.headers.origin
+        // ほかのページ（同じ PC の別の開発サーバー・ほかのサイト）からは使わせない。画面そのもの（同じオリジン）と、
+        // Origin を付けない mod（Claude Code）からだけ受け付ける。Origin の付かない GET（画像の読み込みなど）も、
+        // ブラウザが付ける Sec-Fetch-Site で見分ける（ほかのサイトから /bridge/stream につながれ、声を出す画面を奪われないように）
         const port = server.config.server.port ?? 5173
-        if (origin && origin !== `http://localhost:${port}` && origin !== `http://127.0.0.1:${port}`) {
-          return send(res, 403, { message: 'このページからは使えません' })
-        }
+        if (isCrossSite(req.headers, port)) return send(res, 403, { message: 'このページからは使えません' })
         const path = (req.url ?? '/').split('?')[0]
 
         if (path === '/stream' && req.method === 'GET') {

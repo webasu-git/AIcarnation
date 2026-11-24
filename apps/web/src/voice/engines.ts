@@ -1,4 +1,4 @@
-import { IS_COMPANION, withToken } from '../runtime'
+import { IS_COMPANION, companionFetch } from '../runtime'
 import { reactive } from 'vue'
 import { EngineWarmup, type EngineStatus } from './engineWarmup'
 import type { EngineTone } from './tone'
@@ -28,15 +28,28 @@ export function parseEngineVoiceURI(uri: string): { engine: EngineId; styleId: n
 }
 
 function url(engine: EngineId, path: string): string {
-  return withToken(`/tts/${engine}${path}`)
+  return `/tts/${engine}${path}`
 }
 
-/** エンジンへのリクエスト。つながらない・中継が 502 を返すときは「起動していません」にする */
+/**
+ * エンジンの応答を待つ時間（エンジンが固まっても、読み上げや起動の待ちが終わらないままにならないように）。
+ * 声のモデルを入れるのはファイルが大きく、合成は文が長いと時間がかかるので長めにする
+ */
+function engineTimeoutMs(path: string): number {
+  if (path.startsWith('/aivm_models/install')) return 600_000
+  if (path.startsWith('/synthesis') || path.startsWith('/audio_query')) return 60_000
+  return 15_000
+}
+
+/** エンジンへのリクエスト。つながらない・中継が 502 を返すときは「起動していません」、時間内に答えなければ「応答がありません」にする */
 async function engineFetch(engine: EngineId, path: string, init?: RequestInit): Promise<Response> {
   let res: Response
+  const timeout = AbortSignal.timeout(engineTimeoutMs(path))
+  const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
   try {
-    res = await fetch(url(engine, path), init)
+    res = await companionFetch(url(engine, path), { ...init, signal })
   } catch {
+    if (timeout.aborted) throw new Error('応答がありません')
     throw new Error('起動していません')
   }
   if (res.status === 502 || res.status === 504) throw new Error('起動していません')
@@ -54,7 +67,7 @@ async function engineIsUp(engine: EngineId): Promise<boolean> {
 
 /** 同梱サーバーが知っている、エンジンの起動の様子（開発サーバーなど、知らせが無ければ unknown） */
 async function engineState(engine: EngineId): Promise<string> {
-  const res = await fetch(withToken('/companion/engine'))
+  const res = await companionFetch('/companion/engine')
   if (!res.ok) return 'unknown'
   const states = (await res.json()) as Partial<Record<EngineId, string>> | null
   return states?.[engine] ?? 'unknown'
@@ -83,7 +96,7 @@ export async function restartEngine(engine: EngineId): Promise<boolean> {
   const tooOld = 'アバターを起動した Claude Code が古いバージョンのままです。その Claude Code を開き直してから、もう一度お試しください'
   let res: Response
   try {
-    res = await fetch(withToken('/companion/engine/restart'), {
+    res = await companionFetch('/companion/engine/restart', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ engine }),

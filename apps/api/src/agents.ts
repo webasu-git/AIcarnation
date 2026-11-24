@@ -91,6 +91,13 @@ export function agentRoutes(getGenerator: (env: Env) => AgentGenerator, getVoice
     if (!parsed.ok) return c.json({ code: 'invalid_request', message: parsed.reason }, 400)
 
     const anonId = c.get('anonId')
+    // 数える前に、モデルを用意できるかを確かめる（設定が足りないのに回数だけ減らさない。会話と同じ順）
+    let generator: AgentGenerator
+    try {
+      generator = getGenerator(c.env)
+    } catch {
+      return c.json({ code: 'upstream_error', message: 'サーバーの設定が不足しています' }, 500)
+    }
     // モデルを呼ぶ前に1回分を数える（失敗しても戻さない。呼んだ分の費用はかかっているため）
     if (!(await reserveUsage(c.env, anonId))) {
       return c.json({ code: 'usage_limit', message: USAGE_LIMIT_MESSAGE, resetsAt: nextResetJst() }, 429)
@@ -98,7 +105,7 @@ export function agentRoutes(getGenerator: (env: Env) => AgentGenerator, getVoice
 
     try {
       // 利用者が接続を切ったら、モデルの呼び出しも止める（回数は先に数えてあるので、上限のすり抜けにはならない）
-      const agent = await getGenerator(c.env).generate(parsed.value, c.req.raw.signal)
+      const agent = await generator.generate(parsed.value, c.req.raw.signal)
       console.log(JSON.stringify({ type: 'generate', user: await logId(anonId), at: new Date().toISOString(), images: parsed.value.images.length }))
       return c.json(agent)
     } catch (err) {
@@ -121,11 +128,18 @@ export function agentRoutes(getGenerator: (env: Env) => AgentGenerator, getVoice
   app.post('/agents/suggest-voice', async (c) => {
     const parsed = parseSuggestVoiceRequest(await c.req.json().catch(() => null))
     if (!parsed.ok) return c.json({ code: 'invalid_request', message: parsed.reason }, 400)
+    // 数える前に、モデルを用意できるかを確かめる（設定が足りないのに回数だけ減らさない）
+    let suggester: VoiceSuggester
+    try {
+      suggester = getVoiceSuggester(c.env)
+    } catch {
+      return c.json({ voiceURI: fallbackVoice(parsed.value), reason: '推薦できなかったため、日本語の声を選びました' })
+    }
     if (!(await reserveVoiceSuggestion(c.env, c.get('anonId')))) {
       return c.json({ voiceURI: fallbackVoice(parsed.value), reason: '今日の推薦の上限に達したため、日本語の声を選びました' })
     }
     try {
-      return c.json(await getVoiceSuggester(c.env).suggest(parsed.value, c.req.raw.signal))
+      return c.json(await suggester.suggest(parsed.value, c.req.raw.signal))
     } catch (err) {
       // 推薦できなくても作成は続けられるよう、日本語の声を返す
       const code = classifyClaudeError(err)

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import {
   DEFAULT_VOICE,
   NO_VRM,
+  normalizeAgentDefinition,
   withEmotionInstruction,
   type AgentDefinition,
   type AgentMissing,
@@ -25,6 +26,7 @@ import { deleteAgent, loadAgents, saveAgent } from '../db/agents'
 import { clearMessages } from '../db/messages'
 import { deleteVrmFile, getVrmFile } from '../db/vrmFiles'
 import { getSetting, setSetting } from '../db/settings'
+import { laterDelay, withRetry } from '../retry'
 
 /**
  * ストアの中身は Vue のリアクティブなオブジェクトで、IndexedDB や structuredClone に渡せないため、
@@ -53,21 +55,44 @@ function backup(id: string, task: () => Promise<void>) {
 /** 読み込むキャラクターのファイルの大きさの上限（設定と辞書だけなので小さい） */
 const MAX_CHARACTER_JSON_BYTES = 512 * 1024
 
+/** キャラクターの変更（id と作った日時は変えない） */
+type AgentChanges = Partial<Omit<AgentDefinition, 'id' | 'createdAt'>>
+
 export const useAgentsStore = defineStore('agents', () => {
   const agents = ref<AgentDefinition[]>([])
   const currentId = ref('')
   const current = computed(() => agents.value.find((a) => a.id === currentId.value) ?? agents.value[0] ?? null)
 
+  /**
+   * 保存できなかったこと（画面の上に知らせる）。
+   * - agents：変更を保存できなかったキャラクターの id。変更は画面にも入れない（保存できた分だけを見せる）。そのキャラクターを次に保存できたら消す
+   * - current：選んだキャラクター。画面は切り替えたまま、あとで保存し直す
+   */
+  const unsaved = ref<{ agents: string[]; current: boolean }>({ agents: [], current: false })
+
   async function persist(agent: AgentDefinition) {
     const data = plain(agent)
-    await saveAgent(data)
-    backup(data.id, () => syncAgent(data))
+    try {
+      await withRetry(() => saveAgent(data))
+    } catch (err) {
+      // 知らせるのは、一覧にあるキャラクターの変更だけ（新しく作る・複製するときの失敗は、呼び出し元が伝える。
+      // 一覧に無い id を残すと、保存し直す道が無く、知らせが消えなくなる）
+      if (agents.value.some((a) => a.id === data.id) && !unsaved.value.agents.includes(data.id)) unsaved.value.agents.push(data.id)
+      throw err
+    }
+    unsaved.value.agents = unsaved.value.agents.filter((id) => id !== data.id)
+    // バックアップには、前の版で入った値を今の決まりに直して送る（中継 API の検証で断られ続けないように）
+    backup(data.id, () => syncAgent(normalizeAgentDefinition(data)))
   }
 
   async function load() {
     // 一覧と「どれを選んでいたか」は、両方読み終えてから同時に入れる。
     // 一覧だけ先に入れると、その間は先頭のキャラクターが選択中に見え、先頭の見た目・履歴・動きを読み始めてしまう
-    const [list, saved] = await Promise.all([loadAgents(), getSetting('currentAgentId')])
+    // 保存先に一時的につながらないことがあるので、間を空けて読み直す。それでも読めなければ失敗を返す
+    // （読めないのに「キャラクターが無い」とみなして既定のキャラクターを作ると、保存済みのキャラクターを上書きしてしまう）
+    const [stored, saved] = (await withRetry(() => Promise.all([loadAgents(), getSetting('currentAgentId')])))!
+    // 前の版で入った範囲外の値は、画面でも今の決まりに合う値で扱う（次に保存したときに直る）
+    const list = stored.map(normalizeAgentDefinition)
     if (list.length === 0) {
       const first = createDefaultAgent(NO_VRM)
       await persist(first)
@@ -77,10 +102,31 @@ export const useAgentsStore = defineStore('agents', () => {
     agents.value = list
   }
 
+  let selectCount = 0
+  let reselectTimer: ReturnType<typeof setTimeout> | null = null
+  let reselectFailures = 0
+
+  /** キャラクターを選ぶ。保存できなかったら知らせ、あとで保存し直す（途中で別のキャラクターを選んだら、古いほうはやめる） */
   async function select(id: string) {
     if (!agents.value.some((a) => a.id === id)) return
     currentId.value = id
-    await setSetting('currentAgentId', id)
+    const mine = ++selectCount
+    const isLatest = () => mine === selectCount
+    try {
+      await withRetry(() => setSetting('currentAgentId', id), isLatest)
+      if (isLatest()) {
+        unsaved.value.current = false
+        reselectFailures = 0
+      }
+    } catch {
+      if (!isLatest()) return
+      unsaved.value.current = true
+      // 保存し直しは、失敗が続くほど間を空ける（保存先が止まったままのとき、試し続けないように）
+      reselectTimer ??= setTimeout(() => {
+        reselectTimer = null
+        if (unsaved.value.current) void select(currentId.value)
+      }, laterDelay(reselectFailures++))
+    }
   }
 
   /** 生成・入力した設定と見た目から新しいエージェントを作り、選択する */
@@ -101,18 +147,42 @@ export const useAgentsStore = defineStore('agents', () => {
     return agent
   }
 
-  async function update(id: string, changes: Partial<Omit<AgentDefinition, 'id' | 'createdAt'>>) {
-    const index = agents.value.findIndex((a) => a.id === id)
-    const before = agents.value[index]
+  /** キャラクターごとの変更の列。保存のやり直しで待っている間の変更は、そのあとに順に行う（古い変更で新しい変更を上書きしないように） */
+  const updating = new Map<string, Promise<unknown>>()
+  /** 消している（消した）キャラクター。あとから入った変更で、保存し直さない */
+  const removing = new Set<string>()
+
+  /**
+   * キャラクターを変える。changes に関数を渡すと、前の変更を保存し終えた時点の最新の中身から変更を作る
+   * （今の中身をもとに作る変更（動きを1つ足すなど）は、関数で渡す。保存を待っている前の変更を消さないように）
+   */
+  function update(id: string, changes: AgentChanges | ((agent: AgentDefinition) => AgentChanges)): Promise<void> {
+    // 消し始めたあとに頼まれた変更はしない。失敗を返して、呼び出し元に表示を戻させる（成功に見せない）。
+    // 消し始める前に頼まれた変更は列に入っていて、削除はそれを待つ
+    if (removing.has(id)) return Promise.reject(new Error('このキャラクターは削除しています'))
+    const queued = (updating.get(id) ?? Promise.resolve()).catch(() => undefined).then(() => applyUpdate(id, changes))
+    updating.set(id, queued)
+    void queued.finally(() => {
+      if (updating.get(id) === queued) updating.delete(id)
+    }).catch(() => undefined)
+    return queued
+  }
+
+  async function applyUpdate(id: string, changes: AgentChanges | ((agent: AgentDefinition) => AgentChanges)) {
+    // 前の変更を保存し終えてから、その時点の最新の中身に重ねる
+    const before = agents.value.find((a) => a.id === id)
     if (!before) return
-    const after: AgentDefinition = { ...before, ...changes, updatedAt: new Date().toISOString() }
+    const resolved = typeof changes === 'function' ? changes(before) : changes
+    const after: AgentDefinition = { ...before, ...resolved, updatedAt: new Date().toISOString() }
     after.systemPrompt = withEmotionInstruction(after.systemPrompt)
     // 読み込んだキャラクターの足りない素材は、入れたものから消す
     const missing = pruneMissing(after)
     if (missing) after.missing = missing
     else delete after.missing
     await persist(after)
-    agents.value[index] = after
+    // 保存を待っている間に一覧が変わっている（ほかのキャラクターを消したなど）ことがあるので、id で探して入れる
+    const index = agents.value.findIndex((a) => a.id === id)
+    if (index >= 0) agents.value[index] = after
     await releaseFiles(filesOf(before))
   }
 
@@ -123,8 +193,10 @@ export const useAgentsStore = defineStore('agents', () => {
   async function dismissMissing(id: string, key: keyof AgentMissing) {
     const agent = agents.value.find((a) => a.id === id)
     if (!agent?.missing?.[key]) return
-    const { [key]: _removed, ...rest } = agent.missing
-    await update(id, { missing: Object.keys(rest).length ? rest : undefined })
+    await update(id, (latest) => {
+      const { [key]: _removed, ...rest } = latest.missing ?? {}
+      return { missing: Object.keys(rest).length ? rest : undefined }
+    })
   }
 
   /** キャラクターが使っているファイル（VRM・動き・背景・アイコン）の id */
@@ -142,9 +214,9 @@ export const useAgentsStore = defineStore('agents', () => {
     for (const id of new Set(ids)) if (!inUse.has(id)) await deleteVrmFile(id).catch(() => undefined)
   }
 
-  /** キャラクターの動きの割り当てを入れ替える（外したファイルは、ほかで使っていなければ消す） */
-  async function setMotions(id: string, motions: AgentMotions) {
-    await update(id, { motions })
+  /** キャラクターの動きの割り当てを変える。edit は、その時点の最新の割り当てから新しい割り当てを作る（外したファイルは、ほかで使っていなければ消す） */
+  async function setMotions(id: string, edit: (motions: AgentMotions) => AgentMotions) {
+    await update(id, (latest) => ({ motions: edit(latest.motions ?? {}) }))
   }
 
   async function duplicate(id: string) {
@@ -163,19 +235,48 @@ export const useAgentsStore = defineStore('agents', () => {
     await select(copy.id)
   }
 
-  /** エージェントと、その会話履歴・使われなくなったVRMファイルを消す */
-  async function remove(id: string) {
+  /** 削除の列（重ねて消すと、どちらも「一覧が空」とみなして既定のキャラクターを 2 体作るので、1 つずつ消す）と、消している途中のもの */
+  let removeChain: Promise<unknown> = Promise.resolve()
+  const removals = new Map<string, Promise<void>>()
+
+  /** エージェントと、その会話履歴・使われなくなったVRMファイルを消す。同じキャラクターを重ねて消すと、同じ削除の結果を返す */
+  function remove(id: string): Promise<void> {
+    const inProgress = removals.get(id)
+    if (inProgress) return inProgress
+    if (!agents.value.some((a) => a.id === id) || removing.has(id)) return Promise.resolve()
+    // 頼まれた時点で「消している」印を付ける（このあとに頼まれた変更は保存しない）
+    removing.add(id)
+    const removal = removeChain.catch(() => undefined).then(() => removeNow(id))
+    removeChain = removal
+    removals.set(id, removal)
+    void removal.finally(() => removals.delete(id)).catch(() => undefined)
+    return removal
+  }
+
+  async function removeNow(id: string) {
     const target = agents.value.find((a) => a.id === id)
     if (!target) return
-    await deleteAgent(id)
-    await clearMessages(id)
+    // 保存を待っている変更が済むのを待って消す（あとから保存が成功して、消したキャラクターが戻らないように）
+    try {
+      await updating.get(id)?.catch(() => undefined)
+      await deleteAgent(id)
+    } catch (err) {
+      // 消せなかった：印を外して、変更も削除も、もう一度できるようにする
+      removing.delete(id)
+      throw err
+    }
+    // キャラクターはもう消えたので、履歴を消せなくても一覧からは外す（残った履歴は、同じ id が使われないので表に出ない）
+    await clearMessages(id).catch(() => undefined)
     agents.value = agents.value.filter((a) => a.id !== id)
+    unsaved.value.agents = unsaved.value.agents.filter((x) => x !== id)
     await releaseFiles(filesOf(target))
     backup(id, () => deleteRemoteAgent(id))
 
     if (agents.value.length === 0) {
+      // 最後の 1 体を消したら、既定のキャラクターを作る。保存できなくても、削除はできているので失敗にしない
+      // （保存できなかった既定のキャラクターは、次に開いたときに作り直される）
       const first = createDefaultAgent(NO_VRM)
-      await persist(first)
+      await persist(first).catch(() => undefined)
       agents.value = [first]
     }
     if (currentId.value === id) await select(agents.value[0]!.id)
@@ -288,6 +389,7 @@ export const useAgentsStore = defineStore('agents', () => {
     agents,
     currentId,
     current,
+    unsaved,
     load,
     select,
     create,

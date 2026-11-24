@@ -4,7 +4,7 @@ import { DEFAULT_BACKGROUND_COLOR, type AgentBackground } from '@aicarnation/sha
 import AppIcon from './ui/AppIcon.vue'
 import SegmentedControl from './ui/SegmentedControl.vue'
 import ToggleSwitch from './ui/ToggleSwitch.vue'
-import { saveVrmFile } from '../db/vrmFiles'
+import { deleteVrmFile, saveVrmFile } from '../db/vrmFiles'
 import { useAgentsStore } from '../stores/agents'
 import { useSettingsStore } from '../stores/settings'
 import type { VrmViewer } from '../vrm/viewer'
@@ -54,6 +54,15 @@ watch(
     if (background.value.kind === 'color') lastColor.value = background.value.color
   },
 )
+// 保存された単色が変わったら、見本の選択も合わせる（保存の失敗で戻したあと、続けて選んだ色が保存できたときなど）
+watch(
+  () => (background.value.kind === 'color' ? background.value.color : null),
+  (color) => {
+    if (color && savingOf(agents.current?.id) === 0) lastColor.value = color
+  },
+)
+// キャラクターを切り替えた・単色に戻したら、ファイルの知らせは消す（前のキャラクター・前の操作のものなので）
+watch([() => agents.current?.id, kind], () => (fileError.value = ''))
 const isCustomColor = computed(() => !SWATCHES.some((s) => s.color === lastColor.value))
 
 /**
@@ -80,11 +89,36 @@ const swatchLabel = computed(() => SWATCHES.find((s) => s.color === lastColor.va
 const busy = ref(false)
 const fileError = ref('')
 
-async function save(next: AgentBackground) {
-  const agent = agents.current
-  if (!agent) return
+/** キャラクターごとの、保存している最中の数（保存中は、保存済みの色に見本を合わせない。続けて選んだ色が一瞬戻って見えないように） */
+const saving = new Map<string, number>()
+const savingOf = (id: string | undefined) => (id ? (saving.get(id) ?? 0) : 0)
+
+/**
+ * 背景を保存する。agentId を渡すと、そのキャラクターに保存する（ファイルを選んでいる間に切り替えても、選んだときのキャラクターに）。
+ * next に関数を渡すと、保存するときの最新の背景から作る。
+ * 保存できなければ、選んでいた種類・色を保存されている背景に戻して false を返す（知らせは画面の上に出る）
+ */
+async function save(next: AgentBackground | ((latest: AgentBackground | undefined) => AgentBackground), agentId = agents.current?.id): Promise<boolean> {
+  if (!agentId) return false
   emit('clear-error')
-  await agents.update(agent.id, { backdrop: next })
+  saving.set(agentId, savingOf(agentId) + 1)
+  let ok = false
+  try {
+    await agents.update(agentId, (latest) => ({ backdrop: typeof next === 'function' ? next(latest.backdrop) : next }))
+    ok = true
+  } catch {
+    ok = false
+  } finally {
+    saving.set(agentId, savingOf(agentId) - 1)
+  }
+  // そのキャラクターの保存がすべて済んだら、種類・色を保存されている背景に合わせる。
+  // 種類を合わせるのは、失敗したとき（選んでいたものを戻す）と、画像・動画が保存されたとき（保存中に「単色」を押しても、
+  // ステージは画像なので合わせる）だけ。単色が保存されたときは、そのあとに押した「画像・動画」（ファイルを選ぶ途中）を戻さない
+  if (savingOf(agentId) === 0 && agents.current?.id === agentId) {
+    if (!ok || background.value.kind !== 'color') kind.value = background.value.kind
+    if (background.value.kind === 'color') lastColor.value = background.value.color
+  }
+  return ok
 }
 
 function pickColor(color: string) {
@@ -107,23 +141,37 @@ async function onImageFile(e: Event) {
     return
   }
   fileError.value = ''
+  // 選んだときのキャラクターに保存する（ファイルを保存している間に切り替えても、切り替えた先に保存しない）
+  const agentId = agents.current?.id
+  if (!agentId) return
   busy.value = true
   try {
-    const fileId = await saveVrmFile(file)
-    // 見せ方は、替える前のものを引き継ぐ（同じ場面の画像を差し替えるときに、調整し直さずに済むように）
-    const keep = image.value
-    await save({
-      kind: 'image',
-      fileId,
-      name: file.name,
-      media,
-      focusX: keep?.focusX ?? 0.5,
-      focusY: keep?.focusY ?? 0.5,
-      zoom: keep?.zoom ?? 1,
-      brightness: keep?.brightness ?? 1,
-      blur: keep?.blur ?? 0,
-      parallax: keep?.parallax ?? false,
-    })
+    let fileId: string
+    try {
+      fileId = await saveVrmFile(file)
+    } catch {
+      fileError.value = 'ファイルを保存できませんでした。少し待ってから、もう一度お選びください'
+      return
+    }
+    // 見せ方は、替える前のものを引き継ぐ（同じ場面の画像を差し替えるときに、調整し直さずに済むように）。
+    // 引き継ぐのは、保存するときのそのキャラクターの最新の背景
+    const saved = await save((latest) => {
+      const keep = latest && latest.kind !== 'color' ? latest : null
+      return {
+        kind: 'image',
+        fileId,
+        name: file.name,
+        media,
+        focusX: keep?.focusX ?? 0.5,
+        focusY: keep?.focusY ?? 0.5,
+        zoom: keep?.zoom ?? 1,
+        brightness: keep?.brightness ?? 1,
+        blur: keep?.blur ?? 0,
+        parallax: keep?.parallax ?? false,
+      }
+    }, agentId)
+    // キャラクターに保存できなければ、先に保存した画像・動画のファイルを消す（行き場の無いファイルを残さない）
+    if (!saved) await deleteVrmFile(fileId).catch(() => undefined)
   } finally {
     busy.value = false
   }
@@ -147,8 +195,19 @@ function previewView() {
   props.getViewer()?.setBackgroundView({ focusX, focusY, zoom, brightness, parallax })
 }
 function saveView() {
-  const b = image.value
-  if (b) void save({ ...b, ...view.value })
+  const agent = agents.current
+  if (!agent || !image.value) return
+  emit('clear-error')
+  const adjusted = { ...view.value }
+  // 調整は、保存するときの最新の背景に重ねる（画像を替えている途中に動かしても、替える前の画像に戻さない）
+  agents
+    .update(agent.id, (latest) => (latest.backdrop && latest.backdrop.kind !== 'color' ? { backdrop: { ...latest.backdrop, ...adjusted } } : {}))
+    .catch(() => {
+      // 保存できなかった：スライダーとステージを、保存されている見せ方に戻す（知らせは画面の上に出る）
+      if (agents.current?.id !== agent.id) return
+      view.value = pickView(image.value)
+      previewView()
+    })
 }
 
 /** 小さい画像はステージに引き伸ばすとぼやけるので、目安を出す */

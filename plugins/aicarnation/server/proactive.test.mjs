@@ -152,3 +152,20 @@ test('提案の記録：話したあと 5 分以内の発言で「反応があ�
     await rm(data, { recursive: true, force: true })
   }
 })
+
+test('提案の文に URL・ファイルの場所・コマンドが入っていたら出さない', () => {
+  for (const text of [
+    'https://example.com を開いてみない？',
+    'example.com を見てみて',
+    String.raw`C:\Users\me\a.txt を消してみたら？`,
+    '~/work/app/ を見直そう',
+    '`rm -rf` で片付けよう',
+    'npm install foo してみない？',
+    'curl -s で試してみて',
+    'cat a | grep b してみよう',
+  ]) {
+    assert.equal(validateSuggestion({ propose: true, emotion: 'neutral', text, reason: 'x' }).propose, false, text)
+  }
+  // ふつうの話し言葉は通る
+  assert.equal(validateSuggestion({ propose: true, emotion: 'happy', text: '昨日の続き、git の整理から始めてみない？', reason: 'x' }).propose, true)
+})

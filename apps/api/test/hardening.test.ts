@@ -34,6 +34,13 @@ describe('利用回数の確保', () => {
     expect(await globalCount()).toBe(before + 1)
   })
 
+  it('全体の上限で断ったときは、利用者の回数を減らさない', async () => {
+    const anonId = crypto.randomUUID()
+    const full = withLimits(100, await globalCount())
+    expect(await reserveUsage(full, anonId)).toBeNull()
+    expect((await getUsage(full, anonId)).used).toBe(0)
+  })
+
   it('自分の上限に達した利用者が送り続けても、全体の枠は減らない', async () => {
     const anonId = crypto.randomUUID()
     const limited = withLimits(1, 100_000)

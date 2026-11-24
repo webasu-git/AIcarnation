@@ -199,6 +199,46 @@ const VRM_SOURCES: readonly string[] = ['local', 'none', 'vroidhub']
 
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === 'string')
 
+/** 数で、min〜max に収まっているか（NaN・無限大は通さない） */
+export const inRange = (v: unknown, min: number, max: number): v is number =>
+  typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max
+/** 色の番号（#rgb・#rrggbb・#rrggbbaa）。背景の色は、画面の色選びとこの形だけを使う（url(…) などを入れさせない） */
+export const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
+
+/** n を min〜max に収める。数でなければ fallback */
+const clamp = (n: unknown, min: number, max: number, fallback: number): number =>
+  typeof n === 'number' && Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback
+
+/**
+ * 前の版で入った値（範囲外の声の数値・色の番号ではない背景の色）を、今の決まりに合う値に直したエージェントを返す。
+ * 直さないと、検証を厳しくした中継 API への同期（バックアップ）が黙って失敗し続ける
+ */
+export function normalizeAgentDefinition<T extends AgentDefinition>(agent: T): T {
+  const given: Partial<AgentVoice> = agent.voice ?? {}
+  const voice: AgentVoice = {
+    ...given,
+    voiceURI: typeof given.voiceURI === 'string' ? given.voiceURI : '',
+    rate: clamp(given.rate, 0.5, 2, 1),
+    pitch: clamp(given.pitch, 0, 2, 1),
+  }
+  if (given.intonation !== undefined) voice.intonation = clamp(given.intonation, 0, 2, 1)
+  if (given.tempo !== undefined) voice.tempo = clamp(given.tempo, 0, 2, 1)
+  const b = agent.backdrop
+  const backdrop = b && b.kind === 'color' && !HEX_COLOR.test(b.color) ? { kind: 'color' as const, color: DEFAULT_BACKGROUND_COLOR } : b
+  return { ...agent, voice, ...(backdrop ? { backdrop } : {}) }
+}
+
+/** 声の数値が、画面で選べる範囲に収まっているか（読み込み・同期の両方で同じ決まりを使う） */
+export function isValidVoiceNumbers(v: Partial<Record<string, unknown>>): boolean {
+  return (
+    inRange(v.rate, 0.5, 2) &&
+    inRange(v.pitch, 0, 2) &&
+    (v.intonation === undefined || inRange(v.intonation, 0, 2)) &&
+    (v.tempo === undefined || inRange(v.tempo, 0, 2)) &&
+    (v.emotional === undefined || typeof v.emotional === 'boolean')
+  )
+}
+
 /**
  * エージェント定義の形を検証する（JSON 読み込み・D1 同期で使う）。問題があれば理由を返す
  */
@@ -220,8 +260,7 @@ export function validateAgentDefinition(value: unknown): string | null {
     typeof voice !== 'object' ||
     voice === null ||
     typeof voice.voiceURI !== 'string' ||
-    typeof voice.rate !== 'number' ||
-    typeof voice.pitch !== 'number'
+    !isValidVoiceNumbers(voice)
   ) {
     return 'voice の指定が不正です'
   }
@@ -258,7 +297,15 @@ function isAgentMotions(value: unknown): value is AgentMotions {
 function isAgentBackground(value: unknown): value is AgentBackground {
   const b = value as Partial<Record<string, unknown>> | null
   if (typeof b !== 'object' || b === null) return false
-  if (b.kind === 'color') return typeof b.color === 'string'
+  if (b.kind === 'color') return typeof b.color === 'string' && HEX_COLOR.test(b.color)
   if (b.kind !== 'image') return false
-  return typeof b.fileId === 'string' && typeof b.name === 'string' && (b.media === 'image' || b.media === 'video')
+  // 見せ方の数は、あれば数で、無限大などでないこと
+  const numbers = ['focusX', 'focusY', 'zoom', 'brightness', 'blur'] as const
+  return (
+    typeof b.fileId === 'string' &&
+    typeof b.name === 'string' &&
+    (b.media === 'image' || b.media === 'video') &&
+    numbers.every((k) => b[k] === undefined || inRange(b[k], -1e6, 1e6)) &&
+    (b.parallax === undefined || typeof b.parallax === 'boolean')
+  )
 }

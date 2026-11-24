@@ -43,7 +43,12 @@ async function remove() {
   if (!target) return
   if (!window.confirm(`「${target.name}」を削除してもよろしいですか？会話履歴も削除されます。`)) return
   await chat.stopPerforming()
-  await agents.remove(target.id)
+  try {
+    await agents.remove(target.id)
+  } catch {
+    notify(`「${target.name}」を削除できませんでした。少し待ってから、もう一度お試しください`, true)
+    return
+  }
   notify(`「${target.name}」を削除しました`)
 }
 

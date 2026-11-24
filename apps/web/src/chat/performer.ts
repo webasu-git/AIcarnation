@@ -1,3 +1,4 @@
+import { setWindowTimeout } from '../pip/windowTimer'
 import type { Emotion } from '@aicarnation/shared'
 import type { Viseme } from '../vrm/expression'
 import type { MotionState } from '../vrm/idle'
@@ -110,7 +111,8 @@ export class ReplyPerformer {
   }
 
   private wait(ms: number): Promise<void> {
-    return new Promise((resolve) => this.getWindow().setTimeout(resolve, ms))
+    // 小窓が途中で閉じられても、本体の window で続きを待つ（閉じた window のタイマーは動かない）
+    return new Promise((resolve) => setWindowTimeout(this.getWindow(), resolve, ms))
   }
 
   private async run(): Promise<void> {

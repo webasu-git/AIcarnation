@@ -1,16 +1,23 @@
 /// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import { readFileSync } from 'node:fs'
 import { aicarnationDevBridge } from './bridge/vitePlugin'
 import { thirdPartyNotices } from './bridge/thirdPartyNotices'
 import { isCrossSite } from './bridge/sameOrigin'
 
 const DEV_PORT = 5173
+/** 画面に出す版の番号。開発版を入れ直すときは、環境変数 AICARNATION_VERSION で開発版の番号を渡す */
+const pluginManifest = JSON.parse(readFileSync(new URL('../../plugins/aicarnation/.claude-plugin/plugin.json', import.meta.url), 'utf8')) as { version: string }
+const APP_VERSION = process.env.AICARNATION_VERSION || pluginManifest.version
 /** ほかのサイトからの呼び出しは中継しない（false を返すと 404 になる）。中継は Origin を外すので、ここで断る */
 const sameSiteOnly = (req: { headers: Record<string, string | string[] | undefined> }) => (isCrossSite(req.headers, DEV_PORT) ? false : undefined)
 
 export default defineConfig({
   plugins: [vue(), aicarnationDevBridge(), thirdPartyNotices()],
+  define: {
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(APP_VERSION),
+  },
   server: {
     port: DEV_PORT,
     strictPort: true,

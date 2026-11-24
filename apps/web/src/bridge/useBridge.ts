@@ -3,12 +3,14 @@ import { parseBridgeEvent, type BridgePersona } from '@aicarnation/shared'
 import { useAgentsStore } from '../stores/agents'
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
-import { IS_COMPANION, companionHeaders, distrustCompanionServer, verifyCompanionServer, withToken } from '../runtime'
+import { IS_COMPANION, companionFetch, distrustCompanionServer, verifyCompanionServer, withToken } from '../runtime'
 
 export type BridgeConnection = 'off' | 'connecting' | 'connected' | 'error'
 
 /** 同梱版で、つなぎ直しを試す間隔 */
 const RECONNECT_MS = 3000
+/** つなぎ直しの間隔の上限 */
+const RECONNECT_MAX_MS = 60_000
 
 /**
  * Claude 連携。オンの間、開発サーバーのブリッジ（/bridge/stream）を購読し、
@@ -33,10 +35,15 @@ export function useBridge() {
     connection.value = 'off'
   }
 
-  /** 同梱版：少し待ってから、つなぎ先を確かめ直してつなぐ */
+  /** 続けてつなげなかった回数（つなぎ直しの間隔を広げる） */
+  let failures = 0
+
+  /** 同梱版：少し待ってから、つなぎ先を確かめ直してつなぐ。失敗が続くほど間を空ける（最長 1 分） */
   function retryLater() {
     window.clearTimeout(retryTimer)
-    retryTimer = window.setTimeout(() => void connect(), RECONNECT_MS)
+    const delay = Math.min(RECONNECT_MS * 2 ** failures, RECONNECT_MAX_MS)
+    failures++
+    retryTimer = window.setTimeout(() => void connect(), delay)
   }
 
   async function connect() {
@@ -57,6 +64,10 @@ export function useBridge() {
     source = new EventSource(withToken('/bridge/stream'))
     source.onopen = () => {
       connection.value = 'connected'
+      failures = 0
+      // 切れている間に作業が終わっていても終わりの合図は届かないので、表示はいったん待機に戻す
+      // （作業が続いていれば、次の合図でまた出る）
+      chat.resetBridgeStatus()
       void sendPersona()
     }
     source.onerror = () => {
@@ -74,6 +85,15 @@ export function useBridge() {
       try {
         const role = JSON.parse((e as MessageEvent<string>).data) as { speaker?: unknown }
         chat.setBridgeSpeaker(role.speaker !== false)
+      } catch {
+        // 壊れた知らせは捨てる
+      }
+    })
+    // つなぎ直したとき、サーバーが覚えている今の様子（考え中・作業中）を戻す（つないだ直後に一度だけ届く）
+    source.addEventListener('status', (e) => {
+      try {
+        const status = JSON.parse((e as MessageEvent<string>).data) as { label?: unknown }
+        if (typeof status.label === 'string') chat.restoreBridgeStatus(status.label.slice(0, 40))
       } catch {
         // 壊れた知らせは捨てる
       }
@@ -97,9 +117,9 @@ export function useBridge() {
       tone: a.tone,
       personality: a.personality,
     }
-    await fetch('/bridge/persona', {
+    await companionFetch('/bridge/persona', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-aicarnation-bridge': '1', ...companionHeaders() },
+      headers: { 'Content-Type': 'application/json', 'x-aicarnation-bridge': '1' },
       body: JSON.stringify(persona),
     }).catch(() => undefined)
   }
